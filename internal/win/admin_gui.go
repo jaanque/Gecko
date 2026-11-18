@@ -411,6 +411,13 @@ func (a *AdminWindow) destroyFonts() {
 	}
 }
 
+func (a *AdminWindow) primaryServerAddr() string {
+	if len(a.cfg.SuggestedAddrs) > 0 {
+		return a.cfg.SuggestedAddrs[0]
+	}
+	return fmt.Sprintf("127.0.0.1:%d", a.cfg.AgentPort)
+}
+
 func (a *AdminWindow) paint(hwnd uintptr) {
 	var ps paintStruct
 	hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
@@ -439,43 +446,6 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 	a.hits = a.hits[:0]
 	procSetBkMode.Call(memDC, transparentBk)
 
-	// Background (#F6F7F9)
-	fillSolidRect(memDC, cr, rgb(246, 247, 249))
-
-	// 1. Topbar (white, 64px)
-	barH := a.scale(64)
-	pad := a.scale(22)
-	fillSolidRect(memDC, rect{0, 0, cw, barH}, rgb(255, 255, 255))
-	drawLine(memDC, 0, barH-1, cw, barH-1, rgb(228, 228, 231))
-
-	// Primary button: "Generar cliente (.exe)"
-	genW := a.scale(178)
-	genH := a.scale(36)
-	genRC := rect{cw - pad - genW, (barH - genH) / 2, cw - pad, (barH + genH) / 2}
-	genIdx := len(a.hits)
-	a.hits = append(a.hits, adminHitRegion{kind: "gen", rc: genRC})
-
-	oldFont, _, _ := procSelectObject.Call(memDC, a.fontBrand)
-	procSetTextColor.Call(memDC, rgb(24, 24, 27))
-	brandRC := rect{pad, a.scale(11), genRC.Left - a.scale(12), a.scale(35)}
-	drawText(memDC, "Control Remoto", &brandRC, dtLeft|dtSingleLn|dtVCenter)
-
-	subText := fmt.Sprintf("Puerto %d · TLS 1.3 · %s", a.cfg.AgentPort, a.cfg.CertFingerprint)
-	if len(a.cfg.SuggestedAddrs) > 0 {
-		subText = fmt.Sprintf("%s · TLS 1.3", a.cfg.SuggestedAddrs[0])
-	}
-	procSelectObject.Call(memDC, a.fontSub)
-	procSetTextColor.Call(memDC, rgb(113, 113, 122))
-	subRC := rect{pad, a.scale(36), genRC.Left - a.scale(12), a.scale(54)}
-	drawText(memDC, subText, &subRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
-
-	genBg := rgb(24, 24, 27)
-	if a.hoverIdx == genIdx {
-		genBg = rgb(39, 39, 42)
-	}
-	procSelectObject.Call(memDC, a.fontBtn)
-	drawFlatButton(memDC, genRC, a.scale(6), genBg, genBg, rgb(255, 255, 255), "Generar cliente (.exe)")
-
 	// Snapshot state
 	a.mu.Lock()
 	clients := make([]AdminClientRow, len(a.clients))
@@ -485,12 +455,186 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 	noticeIsErr := a.noticeIsError
 	a.mu.Unlock()
 
+	// Background (#F6F7F9)
+	fillSolidRect(memDC, cr, rgb(246, 247, 249))
+
+	// 1. Topbar (white, 56px)
+	barH := a.scale(56)
+	pad := a.scale(18)
+	fillSolidRect(memDC, rect{0, 0, cw, barH}, rgb(255, 255, 255))
+	drawLine(memDC, 0, barH-1, cw, barH-1, rgb(228, 228, 231))
+
+	// Menu toggle button ("☰") on the far left
+	togSz := a.scale(32)
+	togRC := rect{pad, (barH - togSz) / 2, pad + togSz, (barH + togSz) / 2}
+	togIdx := len(a.hits)
+	a.hits = append(a.hits, adminHitRegion{kind: "toggle_menu", rc: togRC})
+
+	togBg := rgb(255, 255, 255)
+	if a.hoverIdx == togIdx {
+		togBg = rgb(244, 244, 245)
+	}
+	oldFont, _, _ := procSelectObject.Call(memDC, a.fontTitle)
+	drawFlatButton(memDC, togRC, a.scale(6), togBg, rgb(228, 228, 231), rgb(24, 24, 27), "☰")
+
+	// Primary button on far right: "+ Generar cliente (.exe)"
+	genW := a.scale(186)
+	genH := a.scale(34)
+	genRC := rect{cw - pad - genW, (barH - genH) / 2, cw - pad, (barH + genH) / 2}
+	genIdx := len(a.hits)
+	a.hits = append(a.hits, adminHitRegion{kind: "gen", rc: genRC})
+
+	// Brand title + online count pill
+	brandLeft := togRC.Right + a.scale(12)
+	procSelectObject.Call(memDC, a.fontBrand)
+	procSetTextColor.Call(memDC, rgb(24, 24, 27))
+	brandRC := rect{brandLeft, 0, brandLeft + a.scale(148), barH}
+	drawText(memDC, "Control Remoto", &brandRC, dtLeft|dtSingleLn|dtVCenter)
+
+	pillLeft := brandRC.Right + a.scale(4)
+	pillW := a.scale(96)
+	if pillLeft+pillW < genRC.Left-a.scale(12) {
+		pillH := a.scale(24)
+		pillRC := rect{pillLeft, (barH - pillH) / 2, pillLeft + pillW, (barH + pillH) / 2}
+		drawRoundedCard(memDC, pillRC, a.scale(12), rgb(246, 247, 249), rgb(228, 228, 231))
+		dotCol := rgb(161, 161, 170)
+		if len(clients) > 0 {
+			dotCol = rgb(22, 163, 74)
+		}
+		drawStatusDot(memDC, pillRC.Left+a.scale(10), pillRC.Top+(pillH-a.scale(7))/2, a.scale(7), dotCol)
+		procSelectObject.Call(memDC, a.fontBody)
+		procSetTextColor.Call(memDC, rgb(82, 82, 91))
+		pTxtRC := rect{pillRC.Left + a.scale(22), pillRC.Top, pillRC.Right - a.scale(8), pillRC.Bottom}
+		drawText(memDC, fmt.Sprintf("%d en línea", len(clients)), &pTxtRC, dtLeft|dtSingleLn|dtVCenter)
+	}
+
+	genBg := rgb(24, 24, 27)
+	if a.hoverIdx == genIdx {
+		genBg = rgb(39, 39, 42)
+	}
+	procSelectObject.Call(memDC, a.fontBtn)
+	drawFlatButton(memDC, genRC, a.scale(6), genBg, genBg, rgb(255, 255, 255), "+ Generar cliente (.exe)")
+
+	// 2. Collapsible Left Menu Panel (224px when visible)
+	contentLeft := pad
+	if a.menuVisible && cw >= a.scale(560) {
+		sideW := a.scale(224)
+		sideRC := rect{0, barH, sideW, ch}
+		fillSolidRect(memDC, sideRC, rgb(255, 255, 255))
+		drawLine(memDC, sideW-1, barH, sideW-1, ch, rgb(228, 228, 231))
+
+		sp := a.scale(14)
+		sy := barH + a.scale(16)
+
+		// Section: MENÚ
+		procSelectObject.Call(memDC, a.fontSmall)
+		procSetTextColor.Call(memDC, rgb(113, 113, 122))
+		lbl1 := rect{sp, sy, sideW - sp, sy + a.scale(16)}
+		drawText(memDC, "MENÚ", &lbl1, dtLeft|dtSingleLn|dtVCenter)
+		sy += a.scale(22)
+
+		// Active item: Equipos en línea
+		nav1RC := rect{sp, sy, sideW - sp, sy + a.scale(34)}
+		drawRoundedCard(memDC, nav1RC, a.scale(6), rgb(244, 244, 245), rgb(244, 244, 245))
+		procSelectObject.Call(memDC, a.fontBtn)
+		procSetTextColor.Call(memDC, rgb(24, 24, 27))
+		n1Txt := rect{nav1RC.Left + a.scale(10), nav1RC.Top, nav1RC.Right - a.scale(10), nav1RC.Bottom}
+		drawText(memDC, fmt.Sprintf("Equipos en línea (%d)", len(clients)), &n1Txt, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+		sy += a.scale(40)
+
+		// Action item: Generar cliente (.exe)
+		nav2RC := rect{sp, sy, sideW - sp, sy + a.scale(34)}
+		nav2Idx := len(a.hits)
+		a.hits = append(a.hits, adminHitRegion{kind: "gen", rc: nav2RC})
+		if a.hoverIdx == nav2Idx {
+			drawRoundedCard(memDC, nav2RC, a.scale(6), rgb(244, 244, 245), rgb(244, 244, 245))
+		}
+		procSelectObject.Call(memDC, a.fontBody)
+		procSetTextColor.Call(memDC, rgb(24, 24, 27))
+		n2Txt := rect{nav2RC.Left + a.scale(10), nav2RC.Top, nav2RC.Right - a.scale(10), nav2RC.Bottom}
+		drawText(memDC, "Generar cliente (.exe)", &n2Txt, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+		sy += a.scale(46)
+
+		drawLine(memDC, sp, sy, sideW-sp, sy, rgb(244, 244, 245))
+		sy += a.scale(14)
+
+		// Section: ESTE SERVIDOR
+		procSelectObject.Call(memDC, a.fontSmall)
+		procSetTextColor.Call(memDC, rgb(113, 113, 122))
+		lbl2 := rect{sp, sy, sideW - sp, sy + a.scale(16)}
+		drawText(memDC, "ESTE SERVIDOR", &lbl2, dtLeft|dtSingleLn|dtVCenter)
+		sy += a.scale(22)
+
+		infoBoxRC := rect{sp, sy, sideW - sp, sy + a.scale(92)}
+		drawRoundedCard(memDC, infoBoxRC, a.scale(6), rgb(249, 250, 251), rgb(228, 228, 231))
+
+		addr := a.primaryServerAddr()
+		procSelectObject.Call(memDC, a.fontMono)
+		procSetTextColor.Call(memDC, rgb(24, 24, 27))
+		aRC := rect{infoBoxRC.Left + a.scale(10), infoBoxRC.Top + a.scale(8), infoBoxRC.Right - a.scale(10), infoBoxRC.Top + a.scale(26)}
+		drawText(memDC, addr, &aRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+
+		procSelectObject.Call(memDC, a.fontSub)
+		procSetTextColor.Call(memDC, rgb(113, 113, 122))
+		sRC := rect{infoBoxRC.Left + a.scale(10), infoBoxRC.Top + a.scale(28), infoBoxRC.Right - a.scale(10), infoBoxRC.Top + a.scale(44)}
+		drawText(memDC, "TLS 1.3 · "+a.cfg.CertFingerprint, &sRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+
+		copyRC := rect{infoBoxRC.Left + a.scale(10), infoBoxRC.Top + a.scale(54), infoBoxRC.Right - a.scale(10), infoBoxRC.Top + a.scale(82)}
+		copyIdx := len(a.hits)
+		a.hits = append(a.hits, adminHitRegion{kind: "copy_addr", rc: copyRC})
+		copyBg := rgb(255, 255, 255)
+		if a.hoverIdx == copyIdx {
+			copyBg = rgb(244, 244, 245)
+		}
+		procSelectObject.Call(memDC, a.fontBtn)
+		drawFlatButton(memDC, copyRC, a.scale(5), copyBg, rgb(212, 212, 216), rgb(24, 24, 27), "Copiar dirección")
+		sy = infoBoxRC.Bottom + a.scale(16)
+
+		// Bottom button: "« Ocultar menú"
+		hideBtnH := a.scale(32)
+		hideRC := rect{sp, ch - a.scale(14) - hideBtnH, sideW - sp, ch - a.scale(14)}
+		hideIdx := len(a.hits)
+		a.hits = append(a.hits, adminHitRegion{kind: "toggle_menu", rc: hideRC})
+
+		// Quick 3-step guide if there is vertical space above the hide button
+		if sy+a.scale(86) < hideRC.Top {
+			procSelectObject.Call(memDC, a.fontSmall)
+			procSetTextColor.Call(memDC, rgb(113, 113, 122))
+			lbl3 := rect{sp, sy, sideW - sp, sy + a.scale(16)}
+			drawText(memDC, "USO RÁPIDO", &lbl3, dtLeft|dtSingleLn|dtVCenter)
+			sy += a.scale(20)
+
+			procSelectObject.Call(memDC, a.fontBody)
+			procSetTextColor.Call(memDC, rgb(82, 82, 91))
+			steps := []string{
+				"1. Genera ClienteRemoto.exe",
+				"2. Ábrelo en otros equipos",
+				"3. Pulsa un equipo y conecta",
+			}
+			for _, st := range steps {
+				stRC := rect{sp, sy, sideW - sp, sy + a.scale(19)}
+				drawText(memDC, st, &stRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+				sy += a.scale(20)
+			}
+		}
+
+		hideBg := rgb(255, 255, 255)
+		if a.hoverIdx == hideIdx {
+			hideBg = rgb(244, 244, 245)
+		}
+		procSelectObject.Call(memDC, a.fontBody)
+		drawFlatButton(memDC, hideRC, a.scale(5), hideBg, rgb(228, 228, 231), rgb(82, 82, 91), "« Ocultar menú")
+
+		contentLeft = sideW + pad
+	}
+
+	contentRight := cw - pad
 	curY := barH + a.scale(18)
 
-	// 2. Pending confirmation banner OR notice banner
+	// 3. Pending confirmation banner OR notice banner
 	if pendingHost != "" {
 		bH := a.scale(48)
-		bRC := rect{pad, curY, cw - pad, curY + bH}
+		bRC := rect{contentLeft, curY, contentRight, curY + bH}
 		drawRoundedCard(memDC, bRC, a.scale(7), rgb(255, 255, 255), rgb(212, 212, 216))
 
 		cancelW := a.scale(86)
@@ -515,7 +659,7 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 		curY += bH + a.scale(14)
 	} else if noticeText != "" {
 		bH := a.scale(42)
-		bRC := rect{pad, curY, cw - pad, curY + bH}
+		bRC := rect{contentLeft, curY, contentRight, curY + bH}
 		bg := rgb(255, 255, 255)
 		border := rgb(212, 212, 216)
 		fg := rgb(24, 24, 27)
@@ -541,14 +685,14 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 		curY += bH + a.scale(14)
 	}
 
-	// 3. Main card: Equipos en línea
-	cardRC := rect{pad, curY, cw - pad, ch - pad}
-	if cardRC.Bottom-cardRC.Top < a.scale(120) {
-		cardRC.Bottom = cardRC.Top + a.scale(120)
+	// 4. Main card: Equipos en línea
+	cardRC := rect{contentLeft, curY, contentRight, ch - pad}
+	if cardRC.Bottom-cardRC.Top < a.scale(140) {
+		cardRC.Bottom = cardRC.Top + a.scale(140)
 	}
 	drawRoundedCard(memDC, cardRC, a.scale(8), rgb(255, 255, 255), rgb(228, 228, 231))
 
-	cardHdrH := a.scale(48)
+	cardHdrH := a.scale(46)
 	drawLine(memDC, cardRC.Left+1, cardRC.Top+cardHdrH, cardRC.Right-1, cardRC.Top+cardHdrH, rgb(228, 228, 231))
 
 	procSelectObject.Call(memDC, a.fontTitle)
@@ -567,13 +711,26 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 		midY := listTop + listH/2
 		procSelectObject.Call(memDC, a.fontTitle)
 		procSetTextColor.Call(memDC, rgb(24, 24, 27))
-		tRC := rect{cardRC.Left + a.scale(24), midY - a.scale(26), cardRC.Right - a.scale(24), midY - a.scale(2)}
+		tRC := rect{cardRC.Left + a.scale(24), midY - a.scale(46), cardRC.Right - a.scale(24), midY - a.scale(22)}
 		drawText(memDC, "No hay equipos conectados", &tRC, dtCenter|dtSingleLn|dtVCenter)
 
 		procSelectObject.Call(memDC, a.fontBody)
 		procSetTextColor.Call(memDC, rgb(113, 113, 122))
-		dRC := rect{cardRC.Left + a.scale(24), midY + a.scale(2), cardRC.Right - a.scale(24), midY + a.scale(26)}
-		drawText(memDC, "Genera ClienteRemoto.exe arriba y ejecútalo en los equipos que quieras controlar.", &dRC, dtCenter|dtSingleLn|dtVCenter|dtEndEllip)
+		dRC := rect{cardRC.Left + a.scale(24), midY - a.scale(18), cardRC.Right - a.scale(24), midY + a.scale(4)}
+		drawText(memDC, "Genera el ejecutable del cliente y ábrelo en los equipos que quieras controlar.", &dRC, dtCenter|dtSingleLn|dtVCenter|dtEndEllip)
+
+		ctaW := a.scale(206)
+		ctaH := a.scale(36)
+		ctaX := cardRC.Left + (cardRC.Right-cardRC.Left-ctaW)/2
+		ctaRC := rect{ctaX, midY + a.scale(16), ctaX + ctaW, midY + a.scale(16) + ctaH}
+		ctaIdx := len(a.hits)
+		a.hits = append(a.hits, adminHitRegion{kind: "gen", rc: ctaRC})
+		ctaBg := rgb(24, 24, 27)
+		if a.hoverIdx == ctaIdx {
+			ctaBg = rgb(39, 39, 42)
+		}
+		procSelectObject.Call(memDC, a.fontBtn)
+		drawFlatButton(memDC, ctaRC, a.scale(6), ctaBg, ctaBg, rgb(255, 255, 255), "Generar ClienteRemoto.exe")
 	} else {
 		rowH := a.scale(60)
 		totalH := int32(len(clients)) * rowH
@@ -619,7 +776,6 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 				drawLine(memDC, cardRC.Left+1, ry+rowH-1, cardRC.Right-1, ry+rowH-1, rgb(244, 244, 245))
 			}
 
-			// Skip detailed drawing if heavily clipped at edges
 			if visBot-visTop < a.scale(34) {
 				continue
 			}
@@ -642,7 +798,7 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 			btnH := a.scale(30)
 			btnRC := rect{cardRC.Right - a.scale(18) - btnW, ry + (rowH-btnH)/2, cardRC.Right - a.scale(18), ry + (rowH+btnH)/2}
 
-			statusW := a.scale(136)
+			statusW := a.scale(130)
 			statusRC := rect{btnRC.Left - a.scale(12) - statusW, ry, btnRC.Left - a.scale(12), ry + rowH}
 
 			textLeft := cardRC.Left + a.scale(38)
@@ -702,6 +858,21 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 	}
 	hit := a.hits[idx]
 	switch hit.kind {
+	case "toggle_menu":
+		a.menuVisible = !a.menuVisible
+		a.hoverIdx = -1
+		procInvalidateRect.Call(hwnd, 0, 0)
+
+	case "copy_addr":
+		addr := a.primaryServerAddr()
+		if copyTextToClipboard(hwnd, addr) {
+			a.mu.Lock()
+			a.noticeText = "Dirección copiada al portapapeles: " + addr
+			a.noticeIsError = false
+			a.mu.Unlock()
+			procInvalidateRect.Call(hwnd, 0, 0)
+		}
+
 	case "gen":
 		a.openGenerateModal(hwnd)
 
@@ -1262,4 +1433,33 @@ func getControlText(hwnd uintptr) string {
 	buf := make([]uint16, n+2)
 	procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	return syscall.UTF16ToString(buf)
+}
+
+func copyTextToClipboard(hwnd uintptr, text string) bool {
+	u16, err := syscall.UTF16FromString(text)
+	if err != nil || len(u16) == 0 {
+		return false
+	}
+	if ok, _, _ := procOpenClipboard.Call(hwnd); ok == 0 {
+		return false
+	}
+	defer procCloseClipboard.Call()
+	procEmptyClipboard.Call()
+
+	byteLen := uintptr(len(u16) * 2)
+	hMem, _, _ := procGlobalAlloc.Call(gmemMoveable, byteLen)
+	if hMem == 0 {
+		return false
+	}
+	locked, _, _ := procGlobalLock.Call(hMem)
+	if locked == 0 {
+		return false
+	}
+	dstPtr := *(*unsafe.Pointer)(unsafe.Pointer(&locked))
+	dst := unsafe.Slice((*uint16)(dstPtr), len(u16))
+	copy(dst, u16)
+	procGlobalUnlock.Call(hMem)
+
+	res, _, _ := procSetClipboardData.Call(cfUnicodeText, hMem)
+	return res != 0
 }
