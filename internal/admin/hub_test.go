@@ -110,7 +110,6 @@ func TestAgentSessionLifecycle(t *testing.T) {
 	if err := protocol.WriteJSON(conn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    id.AuthToken,
 		Hostname: "PC-OFICINA-01",
-		OS:       "windows",
 		Width:    1920,
 		Height:   1080,
 		Monitors: []protocol.MonitorInfo{

@@ -94,7 +94,7 @@ type AdminCallbacks struct {
 	OnDisconnect     func()
 	OnMouse          func(ev protocol.MouseEvent)
 	OnKey            func(ev protocol.KeyEvent)
-	OnFrameAck       func(frameID uint32, sentUnixNano int64)
+	OnFrameAck       func(frameID uint32)
 	OnQuality        func(quality int)
 	OnSelectMonitor  func(monitorIndex int)
 	OnGenerateClient func(params ClientGenParams, destPath string) error

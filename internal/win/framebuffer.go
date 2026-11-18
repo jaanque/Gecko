@@ -11,17 +11,15 @@ import (
 	"io"
 	"runtime"
 	"sync"
-	"sync/atomic"
 
 	"remote-control/internal/protocol"
 )
 
 // FrameMeta holds header information extracted from a decoded MsgFrame.
 type FrameMeta struct {
-	FrameID      uint32
-	SentUnixNano int64
-	Width        int
-	Height       int
+	FrameID uint32
+	Width   int
+	Height  int
 }
 
 // FrameBuffer stores the remote desktop image in top-down 32-bit BGRA format
@@ -78,12 +76,11 @@ func (fb *FrameBuffer) ApplyFrame(data []byte) (FrameMeta, error) {
 		return FrameMeta{}, errors.New("frame header too short")
 	}
 	meta := FrameMeta{
-		FrameID:      binary.BigEndian.Uint32(data[0:4]),
-		SentUnixNano: int64(binary.BigEndian.Uint64(data[4:12])),
-		Width:        int(binary.BigEndian.Uint16(data[12:14])),
-		Height:       int(binary.BigEndian.Uint16(data[14:16])),
+		FrameID: binary.BigEndian.Uint32(data[0:4]),
+		Width:   int(binary.BigEndian.Uint16(data[4:6])),
+		Height:  int(binary.BigEndian.Uint16(data[6:8])),
 	}
-	tileCount := int(binary.BigEndian.Uint16(data[16:18]))
+	tileCount := int(binary.BigEndian.Uint16(data[8:10]))
 	if meta.Width <= 0 || meta.Height <= 0 || meta.Width > 16384 || meta.Height > 16384 {
 		return FrameMeta{}, errors.New("invalid screen dimensions in frame")
 	}
@@ -131,20 +128,15 @@ func (fb *FrameBuffer) ApplyFrame(data []byte) (FrameMeta, error) {
 		if workers > len(rawTiles) {
 			workers = len(rawTiles)
 		}
-		var nextIdx atomic.Int64
 		var wg sync.WaitGroup
 		wg.Add(workers)
 		for w := 0; w < workers; w++ {
-			go func() {
+			go func(start int) {
 				defer wg.Done()
-				for {
-					idx := int(nextIdx.Add(1) - 1)
-					if idx >= len(rawTiles) {
-						return
-					}
+				for idx := start; idx < len(rawTiles); idx += workers {
 					decoded[idx] = decodeRawTile(rawTiles[idx])
 				}
-			}()
+			}(w)
 		}
 		wg.Wait()
 	}

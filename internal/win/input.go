@@ -40,7 +40,6 @@ const (
 
 	keyEventfExtendedKey = 0x0001
 	keyEventfKeyUp       = 0x0002
-	keyEventfUnicode     = 0x0004
 
 	mapvkVKToVSC = 0
 )
@@ -119,27 +118,8 @@ func mapNormalizedToVirtualDesk(normX, normY uint16, monitorIndex int) (int32, i
 	return int32(vx + 0.5), int32(vy + 0.5)
 }
 
-// HandleKey injects a keyboard event (either virtual key or Unicode code unit).
+// HandleKey injects a keyboard event via Win32 SendInput.
 func (inj *InputInjector) HandleKey(ev protocol.KeyEvent) {
-	if ev.Action == protocol.KeyUnicode {
-		if ev.Scan == 0 {
-			return
-		}
-		down := keybdInputPacket{
-			Type:    inputKeyboard,
-			WScan:   ev.Scan,
-			DwFlags: keyEventfUnicode,
-		}
-		up := keybdInputPacket{
-			Type:    inputKeyboard,
-			WScan:   ev.Scan,
-			DwFlags: keyEventfUnicode | keyEventfKeyUp,
-		}
-		procSendInput.Call(1, uintptr(unsafe.Pointer(&down)), unsafe.Sizeof(down))
-		procSendInput.Call(1, uintptr(unsafe.Pointer(&up)), unsafe.Sizeof(up))
-		return
-	}
-
 	if ev.VK == 0 || ev.VK > 0xFE {
 		return
 	}

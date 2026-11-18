@@ -205,7 +205,6 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	if err := protocol.WriteJSON(conn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    a.cfg.AuthToken,
 		Hostname: a.hostname,
-		OS:       "windows",
 		Width:    w,
 		Height:   h,
 		Monitors: protoMons,
@@ -296,16 +295,8 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 			}
 
 		case protocol.MsgFrameAck:
-			if ack, err := protocol.DecodeFrameAck(data); err == nil {
-				for {
-					cur := a.lastAckedFrameID.Load()
-					if int32(ack.FrameID-cur) <= 0 {
-						break
-					}
-					if a.lastAckedFrameID.CompareAndSwap(cur, ack.FrameID) {
-						break
-					}
-				}
+			if frameID, err := protocol.DecodeFrameAck(data); err == nil {
+				a.lastAckedFrameID.Store(frameID)
 				select {
 				case a.ackWakeCh <- struct{}{}:
 				default:
@@ -481,12 +472,7 @@ func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
 	}
 }
 
-func (a *clientAgent) stopAllSessions(reason string) {
-	a.mu.Lock()
-	sid := a.activeID
-	if sid == "" {
-		sid = a.pendingID
-	}
+func (a *clientAgent) clearSessionLocked() {
 	if a.promptTimer != nil {
 		a.promptTimer.Stop()
 		a.promptTimer = nil
@@ -497,6 +483,15 @@ func (a *clientAgent) stopAllSessions(reason string) {
 	}
 	a.pendingID = ""
 	a.activeID = ""
+}
+
+func (a *clientAgent) stopAllSessions(reason string) {
+	a.mu.Lock()
+	sid := a.activeID
+	if sid == "" {
+		sid = a.pendingID
+	}
+	a.clearSessionLocked()
 	conn := a.conn
 	a.mu.Unlock()
 
@@ -511,16 +506,7 @@ func (a *clientAgent) stopAllSessions(reason string) {
 
 func (a *clientAgent) cleanupAfterDisconnect() {
 	a.mu.Lock()
-	if a.promptTimer != nil {
-		a.promptTimer.Stop()
-		a.promptTimer = nil
-	}
-	if a.streamCancel != nil {
-		a.streamCancel()
-		a.streamCancel = nil
-	}
-	a.pendingID = ""
-	a.activeID = ""
+	a.clearSessionLocked()
 	a.conn = nil
 	a.mu.Unlock()
 
@@ -547,21 +533,42 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 		maxInFlight   = 2
 	)
 
+	timer := time.NewTimer(frameInterval)
+	defer timer.Stop()
+
+	sleepTimer := func(d time.Duration) bool {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
+
 	var frameSeq uint32
 
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
+	for ctx.Err() == nil {
 		// Sliding-window pacing: never let more than 2 frames queue in TCP buffers.
 		if int32(a.lastSentFrameID.Load()-a.lastAckedFrameID.Load()) >= maxInFlight {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(300 * time.Millisecond)
 			select {
 			case <-ctx.Done():
 				return
 			case <-a.ackWakeCh:
-			case <-time.After(300 * time.Millisecond):
-				// Safety fallback in case an ACK was delayed.
+			case <-timer.C:
 				a.lastAckedFrameID.Store(a.lastSentFrameID.Load())
 			}
 		}
@@ -572,15 +579,12 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 		force := a.forceKeyframe.Swap(false)
 
 		nextID := frameSeq + 1
-		frame, _, _, err := capturer.CaptureFrame(nextID, start.UnixNano(), monIdx, q, force)
+		frame, _, _, err := capturer.CaptureFrame(nextID, monIdx, q, force)
 		if err != nil {
-			// E.g. temporary UAC/lock screen; wait briefly and retry.
-			select {
-			case <-ctx.Done():
+			if !sleepTimer(200 * time.Millisecond) {
 				return
-			case <-time.After(200 * time.Millisecond):
-				continue
 			}
+			continue
 		}
 
 		if len(frame) > 0 {
@@ -592,15 +596,12 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 			}
 		}
 
-		elapsed := time.Since(start)
-		wait := frameInterval - elapsed
+		wait := frameInterval - time.Since(start)
 		if wait < 2*time.Millisecond {
 			wait = 2 * time.Millisecond
 		}
-		select {
-		case <-ctx.Done():
+		if !sleepTimer(wait) {
 			return
-		case <-time.After(wait):
 		}
 	}
 }

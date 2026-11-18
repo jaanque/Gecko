@@ -11,7 +11,6 @@ import (
 	"image/jpeg"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -256,11 +255,6 @@ func (sc *ScreenCapturer) Close() {
 	sc.hasPrev = false
 }
 
-// Reset forces the next CaptureFrame call to emit a complete keyframe.
-func (sc *ScreenCapturer) Reset() {
-	sc.hasPrev = false
-}
-
 func (sc *ScreenCapturer) releaseGDI() {
 	if sc.hdcMem != 0 && sc.oldObj != 0 {
 		procSelectObject.Call(sc.hdcMem, sc.oldObj)
@@ -310,7 +304,7 @@ func (sc *ScreenCapturer) ensureSurface(hdcScreen uintptr, w, h int) error {
 
 // CaptureFrame captures the selected monitor (0 = Monitor 1, -1 = all monitors) and returns
 // an encoded MsgFrame payload containing only changed 64x64 tiles. Returns nil payload if unchanged.
-func (sc *ScreenCapturer) CaptureFrame(frameID uint32, sentUnixNano int64, monitorIndex, quality int, forceFull bool) ([]byte, int, int, error) {
+func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int, forceFull bool) ([]byte, int, int, error) {
 	if quality < 35 {
 		quality = 35
 	}
@@ -425,25 +419,20 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, sentUnixNano int64, monit
 		if workerCount > jobCount {
 			workerCount = jobCount
 		}
-		var nextIdx atomic.Int64
 		var wg sync.WaitGroup
 		wg.Add(workerCount)
 		for wi := 0; wi < workerCount; wi++ {
 			worker := sc.workers[wi]
-			go func() {
+			go func(start int) {
 				defer wg.Done()
-				for {
-					idx := int(nextIdx.Add(1) - 1)
-					if idx >= jobCount {
-						return
-					}
+				for idx := start; idx < jobCount; idx += workerCount {
 					if enc, ok := worker.encode(curr, stride, sc.jobs[idx], quality); ok {
 						sc.results[idx] = enc
 					} else {
 						sc.results[idx] = encodedTile{}
 					}
 				}
-			}()
+			}(wi)
 		}
 		wg.Wait()
 	}
@@ -468,7 +457,7 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, sentUnixNano int64, monit
 		binary.BigEndian.PutUint32(thdr[9:13], uint32(len(t.data)))
 		sc.outBuf.Write(thdr[:])
 		sc.outBuf.Write(t.data)
-		t.data = nil // release reference promptly
+		t.data = nil
 		validTiles++
 	}
 
@@ -478,10 +467,9 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, sentUnixNano int64, monit
 
 	raw := sc.outBuf.Bytes()
 	binary.BigEndian.PutUint32(raw[0:4], frameID)
-	binary.BigEndian.PutUint64(raw[4:12], uint64(sentUnixNano))
-	binary.BigEndian.PutUint16(raw[12:14], uint16(w))
-	binary.BigEndian.PutUint16(raw[14:16], uint16(h))
-	binary.BigEndian.PutUint16(raw[16:18], validTiles)
+	binary.BigEndian.PutUint16(raw[4:6], uint16(w))
+	binary.BigEndian.PutUint16(raw[6:8], uint16(h))
+	binary.BigEndian.PutUint16(raw[8:10], validTiles)
 
 	result := make([]byte, len(raw))
 	copy(result, raw)

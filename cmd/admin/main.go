@@ -77,8 +77,8 @@ func main() {
 		OnKey: func(ev protocol.KeyEvent) {
 			hub.SendKey(ev)
 		},
-		OnFrameAck: func(frameID uint32, sentUnixNano int64) {
-			hub.SendFrameAck(frameID, sentUnixNano)
+		OnFrameAck: func(frameID uint32) {
+			hub.SendFrameAck(frameID)
 		},
 		OnQuality: func(quality int) {
 			hub.SendStreamConfig(quality, true)

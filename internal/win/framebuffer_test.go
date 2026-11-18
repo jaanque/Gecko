@@ -40,10 +40,9 @@ func TestFrameBufferApplyHybridTiles(t *testing.T) {
 	var pkt bytes.Buffer
 	var hdr [protocol.FrameHeaderSize]byte
 	binary.BigEndian.PutUint32(hdr[0:4], 7)
-	binary.BigEndian.PutUint64(hdr[4:12], 123456789)
-	binary.BigEndian.PutUint16(hdr[12:14], 64)
-	binary.BigEndian.PutUint16(hdr[14:16], 64)
-	binary.BigEndian.PutUint16(hdr[16:18], 2)
+	binary.BigEndian.PutUint16(hdr[4:6], 64)
+	binary.BigEndian.PutUint16(hdr[6:8], 64)
+	binary.BigEndian.PutUint16(hdr[8:10], 2)
 	pkt.Write(hdr[:])
 
 	var thdr [protocol.TileHeaderSize]byte
@@ -72,7 +71,7 @@ func TestFrameBufferApplyHybridTiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyFrame failed: %v", err)
 	}
-	if meta.FrameID != 7 || meta.SentUnixNano != 123456789 || meta.Width != 64 || meta.Height != 64 {
+	if meta.FrameID != 7 || meta.Width != 64 || meta.Height != 64 {
 		t.Fatalf("unexpected meta: %+v", meta)
 	}
 

@@ -1,20 +1,21 @@
 # Control Remoto Simple
 
-Aplicación de escritorio nativa para Windows, ligera, directa y segura para control remoto entre PCs, construida en **Go puro sin dependencias externas** ni servidor web.
+Aplicación de escritorio nativa para Windows, ligera, rápida y segura para control remoto entre PCs, construida en **Go puro sin dependencias externas**.
 
 ## Cómo funciona
 
 1. **Aplicación de Administración (`AdminRemoto.exe`)**:
-   - Aplicación de escritorio nativa de Windows (sin navegador ni ventana de consola).
-   - Muestra en tiempo real la lista de **equipos en línea**.
-   - Incluye el botón **Generar cliente (.exe)** para elegir la IP del servidor, añadir opcionalmente un **logo personalizado (PNG/JPG)** para el cliente y guardar **`ClienteRemoto.exe`** directamente en disco (el mismo ejecutable sirve para todos los equipos).
-   - Al pulsar un equipo disponible, solicita permiso al usuario y, si acepta, abre una ventana nativa mostrando por defecto el **Monitor 1**; si el equipo tiene más monitores, aparece el selector **`M1 / M2 / ... / Todos`** en la barra superior para saltar entre monitores o verlos todos a la vez, junto con calidad y pantalla completa (`F11`).
+   - Aplicación de escritorio nativa de Windows (sin navegador ni consola) con menú superior fijo:
+     - **Equipos**: lista en tiempo real de equipos en línea; pulsa cualquiera para solicitar acceso.
+     - **Crear cliente**: configura IP:Puerto, título de ventana, mensaje de solicitud, calidad inicial, tiempo de espera, inicio minimizado, sonido, botón Desconectar y logo personalizado (PNG/JPG), y guarda **`ClienteRemoto.exe`** (un único ejecutable válido para todos los equipos).
+   - Visor remoto nativo:
+     - Muestra por defecto el **Monitor 1**; si hay varios monitores, permite saltar entre ellos (`M1`, `M2`, …) o ver **`Todos`** a la vez.
+     - Barra superior ocultable (`▲` / `▼ Menú`), calidad **Baja / Estándar / Alta**, FPS y latencia en tiempo real, y atajos **`F11`** (pantalla completa), **`Ctrl+Alt+M`** (menú) y **`Ctrl+Alt+Q`** (desconectar).
 
 2. **Aplicación Cliente (`ClienteRemoto.exe`)**:
-   - Ejecutable nativo de Windows (sin ventana de consola, sin instalar nada).
-   - Muestra únicamente el **logo** (si el admin añadió uno), el **nombre del equipo** y su estado de conexión (el logo también se aplica como icono de la ventana y barra de tareas).
-   - Cuando el administrador solicita acceso, aparecen solo dos botones: **Permitir** y **Denegar**.
-   - Durante una sesión activa muestra un aviso visible con el botón **Desconectar** para cortar el acceso en cualquier momento.
+   - Ejecutable nativo de Windows sin instalación ni dependencias.
+   - Muestra el logo (si se configuró), el **nombre del equipo** y su estado de conexión.
+   - Al recibir solicitud del administrador, ofrece únicamente **Permitir** o **Denegar**.
 
 ## Compilación
 
@@ -24,32 +25,29 @@ Requisitos: Go 1.22 o superior.
 build.bat
 ```
 
-*(También incluido `build.ps1` si usas PowerShell con ejecución de scripts habilitada.)*
+*(También incluido `build.ps1` para PowerShell.)*
 
-Esto genera:
-- `dist\AdminRemoto.exe`: aplicación de escritorio del administrador (con la plantilla del cliente incrustada).
+Genera `dist\AdminRemoto.exe` con la plantilla del cliente ya incrustada.
 
 ## Uso rápido
 
-1. Haz doble clic en `dist\AdminRemoto.exe` en el PC del administrador.
-   - En el primer arranque se crea la carpeta `data\` junto al ejecutable con el certificado TLS 1.3 y el token de autenticación.
-2. Pulsa **Generar cliente (.exe)**, elige la IP del servidor (se detecta automáticamente tu IP LAN, además de `127.0.0.1` para pruebas locales) y guarda **`ClienteRemoto.exe`**.
-3. Copia y ejecuta ese mismo **`ClienteRemoto.exe`** en cualquier PC que quieras controlar.
-4. Los equipos aparecerán automáticamente en **Equipos en línea**. Pulsa cualquiera para solicitar acceso.
+1. Abre `dist\AdminRemoto.exe` en el PC del administrador (en el primer arranque crea `data\` con el certificado TLS 1.3 y el token).
+2. Ve a **Crear cliente**, ajusta las opciones que quieras y guarda **`ClienteRemoto.exe`**.
+3. Ejecuta ese mismo **`ClienteRemoto.exe`** en cualquier equipo a administrar.
+4. En **Equipos**, pulsa el equipo conectado para solicitar control.
 
-> **Nota sobre Firewall de Windows**: Si los clientes están en otros PCs de tu red local, permite el puerto TCP **9443** (configurable con `-agent-port`) en el Firewall de Windows del PC del administrador.
+> **Firewall de Windows**: permite el puerto TCP **9443** (configurable con `-agent-port`) en el PC del administrador si conectas equipos en red local.
 
-## Opciones opcionales (`AdminRemoto.exe`)
+## Opciones de línea de comandos (`AdminRemoto.exe`)
 
 | Flag | Por defecto | Descripción |
 | :--- | :--- | :--- |
-| `-agent-port` | `9443` | Puerto TCP (TLS 1.3) donde escuchan los clientes |
-| `-data-dir` | `./data` | Carpeta donde se guardan certificado y token |
+| `-agent-port` | `9443` | Puerto TCP (TLS 1.3) para clientes |
+| `-data-dir` | `./data` | Carpeta para certificados y token |
 
 ## Arquitectura y seguridad
 
-- **100% nativo y cero dependencias de terceros**: biblioteca estándar de Go + API nativa Win32 (`user32`, `gdi32`, `comdlg32`). Sin navegador, sin Electron, sin WebView, sin servidor HTTP.
-- **TLS 1.3 obligatorio con Certificate Pinning (SHA-256)**: `ClienteRemoto.exe` lleva incrustada la huella SHA-256 exacta del certificado del administrador y rechaza cualquier conexión que no coincida.
-- **Autenticación por token**: token aleatorio de 256 bits verificado en tiempo constante.
-- **Consentimiento explícito en el cliente**: el cliente no captura pantalla ni acepta eventos de ratón/teclado hasta que el usuario pulsa **Permitir**. El aviso no roba el foco del teclado para evitar aprobaciones accidentales mientras el usuario escribe.
-- **Rendimiento**: captura GDI nativa con detección de regiones modificadas (*dirty tiles* 128×128 en JPEG), decodificación en segundo plano y renderizado directo con `StretchDIBits` (doble búfer sin parpadeos). Si la pantalla no cambia, el tráfico de red es 0.
+- **Cero dependencias externas**: 100 % biblioteca estándar de Go + API nativa Win32.
+- **TLS 1.3 con Certificate Pinning (SHA-256)** + token aleatorio de 256 bits verificado en tiempo constante.
+- **Consentimiento explícito en el cliente**: sin captura ni control de entrada hasta pulsar **Permitir**.
+- **Vídeo y control optimizados**: bloques `64×64` con códec híbrido (sin pérdida `Zlib-BGR` para texto/UI + JPEG paralelo para vídeo), control de flujo por ACK hasta 60 FPS, ratón de 5 botones a 120 Hz coalescente y reenvío nativo de atajos de sistema en primer plano.

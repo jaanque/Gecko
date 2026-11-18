@@ -10,7 +10,6 @@ func TestMessageRoundTrip(t *testing.T) {
 	want := AuthPayload{
 		Token:    "secret-token",
 		Hostname: "PC-TEST-01",
-		OS:       "windows",
 		Width:    1920,
 		Height:   1080,
 	}
@@ -22,39 +21,26 @@ func TestMessageRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadMessage failed: %v", err)
 	}
-	if msgType != MsgAuth {
-		t.Fatalf("expected type %d, got %d", MsgAuth, msgType)
-	}
-	if len(payload) == 0 {
-		t.Fatal("expected non-empty payload")
+	if msgType != MsgAuth || len(payload) == 0 {
+		t.Fatalf("unexpected message: type=%d len=%d", msgType, len(payload))
 	}
 }
 
-func TestMouseAndKeyEncoding(t *testing.T) {
+func TestBinaryEventCodecs(t *testing.T) {
 	m := MouseEvent{Action: MouseWheel, Button: ButtonRight, X: 32768, Y: 65535, Delta: -120}
 	m2, err := DecodeMouse(EncodeMouse(m))
-	if err != nil {
-		t.Fatalf("DecodeMouse failed: %v", err)
-	}
-	if m != m2 {
-		t.Fatalf("mouse mismatch: got %+v, want %+v", m2, m)
+	if err != nil || m != m2 {
+		t.Fatalf("mouse mismatch: got %+v err=%v", m2, err)
 	}
 
 	k := KeyEvent{Action: KeyDown, VK: 0x41, Scan: 0x1E, Flags: KeyFlagExtended}
 	k2, err := DecodeKey(EncodeKey(k))
-	if err != nil {
-		t.Fatalf("DecodeKey failed: %v", err)
-	}
-	if k != k2 {
-		t.Fatalf("key mismatch: got %+v, want %+v", k2, k)
+	if err != nil || k != k2 {
+		t.Fatalf("key mismatch: got %+v err=%v", k2, err)
 	}
 
-	ack := FrameAck{FrameID: 42, SentUnixNano: 1700000000123456789}
-	ack2, err := DecodeFrameAck(EncodeFrameAck(ack))
-	if err != nil {
-		t.Fatalf("DecodeFrameAck failed: %v", err)
-	}
-	if ack != ack2 {
-		t.Fatalf("ack mismatch: got %+v, want %+v", ack2, ack)
+	ack2, err := DecodeFrameAck(EncodeFrameAck(42))
+	if err != nil || ack2 != 42 {
+		t.Fatalf("ack mismatch: got %d err=%v", ack2, err)
 	}
 }

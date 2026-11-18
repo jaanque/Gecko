@@ -24,12 +24,10 @@ type ClientInfo struct {
 	ID           string
 	Hostname     string
 	IP           string
-	OS           string
 	Width        int
 	Height       int
 	MonitorCount int
 	Status       string // "online", "pending", "active"
-	ConnectedAt  time.Time
 }
 
 // HubEvents receives asynchronous notifications from the Hub for the desktop UI.
@@ -47,13 +45,11 @@ type agentConn struct {
 	id           string
 	hostname     string
 	ip           string
-	os           string
 	width        int
 	height       int
 	monitorCount int
 	status       string
 	sessionID    string
-	connectedAt  time.Time
 
 	conn    net.Conn
 	writeMu sync.Mutex
@@ -76,7 +72,6 @@ func (a *agentConn) writeJSON(msgType uint8, v any) error {
 type activeSession struct {
 	id       string
 	clientID string
-	hostname string
 	active   bool
 }
 
@@ -105,11 +100,6 @@ func (h *Hub) SetEvents(ev HubEvents) {
 	h.mu.Lock()
 	h.events = ev
 	h.mu.Unlock()
-}
-
-// AgentPort returns the TCP port clients connect to.
-func (h *Hub) AgentPort() int {
-	return h.agentPort
 }
 
 // CertFingerprintShort returns a human-readable prefix of the server TLS SHA-256 fingerprint.
@@ -256,12 +246,10 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 		id:           clientID,
 		hostname:     hostname,
 		ip:           hostIP,
-		os:           auth.OS,
 		width:        auth.Width,
 		height:       auth.Height,
 		monitorCount: monCount,
 		status:       "online",
-		connectedAt:  time.Now(),
 		conn:         rawConn,
 	}
 
@@ -470,7 +458,6 @@ func (h *Hub) RequestConnect(clientID string) error {
 	h.session = &activeSession{
 		id:       sid,
 		clientID: agent.id,
-		hostname: agent.hostname,
 		active:   false,
 	}
 	hostname := agent.hostname
@@ -519,15 +506,12 @@ func (h *Hub) DisconnectSession(reason string) {
 }
 
 // SendFrameAck acknowledges a decoded frame so the client's sliding window advances smoothly.
-func (h *Hub) SendFrameAck(frameID uint32, sentUnixNano int64) {
+func (h *Hub) SendFrameAck(frameID uint32) {
 	agent := h.activeAgent()
 	if agent == nil {
 		return
 	}
-	_ = agent.writeMessage(protocol.MsgFrameAck, protocol.EncodeFrameAck(protocol.FrameAck{
-		FrameID:      frameID,
-		SentUnixNano: sentUnixNano,
-	}))
+	_ = agent.writeMessage(protocol.MsgFrameAck, protocol.EncodeFrameAck(frameID))
 }
 
 // SendMouse forwards a mouse event to the active remote client.
@@ -596,12 +580,10 @@ func (h *Hub) snapshotClientsLocked() []ClientInfo {
 			ID:           a.id,
 			Hostname:     a.hostname,
 			IP:           a.ip,
-			OS:           a.os,
 			Width:        a.width,
 			Height:       a.height,
 			MonitorCount: a.monitorCount,
 			Status:       a.status,
-			ConnectedAt:  a.connectedAt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

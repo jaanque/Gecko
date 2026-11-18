@@ -58,7 +58,6 @@ const (
 	wsSysMenu     = 0x00080000
 	wsMinimizeBox = 0x00020000
 	wsChild       = 0x40000000
-	wsVisible     = 0x10000000
 	bsOwnerDraw   = 0x0000000B
 
 	swHide            = 0
@@ -73,7 +72,6 @@ const (
 	wmDrawItem = 0x002B
 	wmCommand  = 0x0111
 	wmAppState = 0x8001
-	wmAppClose = 0x8002
 
 	bnClicked  = 0
 	odsSelect  = 0x0001
@@ -271,16 +269,6 @@ func (w *ClientWindow) SetState(st ClientUIState, detail string) {
 
 	if hwnd != 0 {
 		procPostMessageW.Call(hwnd, wmAppState, 0, 0)
-	}
-}
-
-// Close asks the window to close gracefully from any goroutine.
-func (w *ClientWindow) Close() {
-	w.mu.Lock()
-	hwnd := w.hwnd
-	w.mu.Unlock()
-	if hwnd != 0 {
-		procPostMessageW.Call(hwnd, wmAppClose, 0, 0)
 	}
 }
 
@@ -682,10 +670,6 @@ func clientWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case wmAppState:
 		w.applyStateToControls()
-		return 0
-
-	case wmAppClose:
-		procDestroyWindow.Call(hwnd)
 		return 0
 
 	case wmCommand:

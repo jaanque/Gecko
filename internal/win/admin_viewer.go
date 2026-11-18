@@ -60,10 +60,9 @@ const (
 	wmSetCursor    = 0x0020
 
 	wmViewerFrame      = 0x8020
-	wmViewerClose      = 0x8021
-	wmViewerToggleFull = 0x8022
-	wmViewerToggleMenu = 0x8023
-	wmViewerDisconnect = 0x8024
+	wmViewerToggleFull = 0x8021
+	wmViewerToggleMenu = 0x8022
+	wmViewerDisconnect = 0x8023
 
 	colorOnColorMode   = 3
 	halftoneMode       = 4
@@ -156,7 +155,7 @@ const (
 type ViewerCallbacks struct {
 	OnMouse         func(ev protocol.MouseEvent)
 	OnKey           func(ev protocol.KeyEvent)
-	OnFrameAck      func(frameID uint32, sentUnixNano int64)
+	OnFrameAck      func(frameID uint32)
 	OnQuality       func(quality int)
 	OnSelectMonitor func(monitorIndex int)
 	OnDisconnect    func()
@@ -190,13 +189,10 @@ type remoteViewer struct {
 	frameCh    chan []byte
 	decoderEnd chan struct{}
 
-	// Non-blocking coalescing input pipeline
-	inputCh      chan queuedInput
-	inputWake    chan struct{}
-	inputDone    chan struct{}
-	moveMu       sync.Mutex
-	pendingMove  protocol.MouseEvent
-	hasPendMove  bool
+	// Non-blocking input pipeline: ordered clicks/keys + coalesced mouse moves.
+	inputCh   chan queuedInput
+	moveCh    chan protocol.MouseEvent
+	inputDone chan struct{}
 
 	// Cached offscreen double buffer (UI thread only)
 	backDC  uintptr
@@ -279,15 +275,15 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 	v.fpsCount = 0
 	v.fpsTick = time.Now()
 	v.rttMs = -1
-	v.frameCh = make(chan []byte, 3)
+	v.frameCh = make(chan []byte, 2)
 	v.decoderEnd = make(chan struct{})
 	v.inputCh = make(chan queuedInput, 256)
-	v.inputWake = make(chan struct{}, 1)
+	v.moveCh = make(chan protocol.MouseEvent, 1)
 	v.inputDone = make(chan struct{})
 	fCh := v.frameCh
 	fEnd := v.decoderEnd
 	inCh := v.inputCh
-	inWake := v.inputWake
+	mvCh := v.moveCh
 	inDone := v.inputDone
 	v.mu.Unlock()
 
@@ -297,9 +293,6 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 	v.hoverBtn = 0
 	clear(v.heldKeys)
 	v.mouseBtns = 0
-	v.moveMu.Lock()
-	v.hasPendMove = false
-	v.moveMu.Unlock()
 
 	activeViewerMu.Lock()
 	activeViewer = v
@@ -351,7 +344,7 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 	v.installKeyboardHook()
 
 	go v.decodeLoop(sessionID, fCh, fEnd)
-	go v.inputLoop(inCh, inWake, inDone)
+	go v.inputLoop(inCh, mvCh, inDone)
 
 	procShowWindow.Call(hwnd, swShowNormal)
 	procUpdateWindow.Call(hwnd)
@@ -410,17 +403,16 @@ func (v *remoteViewer) PushFrame(sessionID string, frame []byte) {
 	cp := make([]byte, len(frame))
 	copy(cp, frame)
 
-	select {
-	case ch <- cp:
-	default:
+	// Keep the freshest frame if the decoder is momentarily busy.
+	if len(ch) == cap(ch) {
 		select {
 		case <-ch:
 		default:
 		}
-		select {
-		case ch <- cp:
-		default:
-		}
+	}
+	select {
+	case ch <- cp:
+	default:
 	}
 }
 
@@ -435,9 +427,8 @@ func (v *remoteViewer) decodeLoop(sessionID string, ch <-chan []byte, done <-cha
 				continue
 			}
 
-			// Acknowledge immediately so the client's 2-frame sliding window advances with minimal latency.
 			if v.cb.OnFrameAck != nil && meta.FrameID > 0 {
-				v.cb.OnFrameAck(meta.FrameID, meta.SentUnixNano)
+				v.cb.OnFrameAck(meta.FrameID)
 			}
 
 			v.mu.Lock()
@@ -464,72 +455,43 @@ func (v *remoteViewer) decodeLoop(sessionID string, ch <-chan []byte, done <-cha
 	}
 }
 
-func (v *remoteViewer) inputLoop(inCh <-chan queuedInput, wake <-chan struct{}, done <-chan struct{}) {
+func (v *remoteViewer) inputLoop(inCh <-chan queuedInput, mvCh <-chan protocol.MouseEvent, done <-chan struct{}) {
 	for {
-		// Prioritize ordered click/wheel/key events, then flush latest coalesced mouse position.
 		select {
 		case <-done:
 			return
 		case item := <-inCh:
-			v.dispatchInput(item)
-			continue
-		default:
-		}
-
-		if mv, ok := v.takePendingMove(); ok {
+			if item.isKey {
+				if v.cb.OnKey != nil {
+					v.cb.OnKey(item.key)
+				}
+			} else if v.cb.OnMouse != nil {
+				v.cb.OnMouse(item.mouse)
+			}
+		case mv := <-mvCh:
 			if v.cb.OnMouse != nil {
 				v.cb.OnMouse(mv)
 			}
-			continue
-		}
-
-		select {
-		case <-done:
-			return
-		case item := <-inCh:
-			v.dispatchInput(item)
-		case <-wake:
-		}
-	}
-}
-
-func (v *remoteViewer) dispatchInput(item queuedInput) {
-	if item.isKey {
-		if v.cb.OnKey != nil {
-			v.cb.OnKey(item.key)
-		}
-	} else {
-		if v.cb.OnMouse != nil {
-			v.cb.OnMouse(item.mouse)
 		}
 	}
 }
 
 func (v *remoteViewer) enqueueMouseMove(ev protocol.MouseEvent) {
-	v.moveMu.Lock()
-	v.pendingMove = ev
-	v.hasPendMove = true
-	v.moveMu.Unlock()
-
 	v.mu.Lock()
-	wake := v.inputWake
+	ch := v.moveCh
 	v.mu.Unlock()
-	if wake != nil {
-		select {
-		case wake <- struct{}{}:
-		default:
-		}
+	if ch == nil {
+		return
 	}
-}
-
-func (v *remoteViewer) takePendingMove() (protocol.MouseEvent, bool) {
-	v.moveMu.Lock()
-	defer v.moveMu.Unlock()
-	if !v.hasPendMove {
-		return protocol.MouseEvent{}, false
+	// Replace any unread move with the latest cursor coordinates.
+	select {
+	case <-ch:
+	default:
 	}
-	v.hasPendMove = false
-	return v.pendingMove, true
+	select {
+	case ch <- ev:
+	default:
+	}
 }
 
 func (v *remoteViewer) enqueueOrderedInput(item queuedInput) {
@@ -1453,10 +1415,6 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case wmKillFocus:
 		v.releaseAllHeldKeys()
-		return 0
-
-	case wmViewerClose:
-		v.CloseUI()
 		return 0
 
 	case wmClose:
