@@ -30,16 +30,12 @@ const (
 	wmAdminCloseViewer = 0x8012
 
 	wmSetFont       = 0x0030
-	wmCtlColorEdit  = 0x0133
-	wmCtlColorStat  = 0x0138
 	cbAddString     = 0x0143
 	cbSetCurSel     = 0x014E
 	cbsDropdown     = 0x0002
 	cbsAutoHScroll  = 0x0040
 	wsVScroll       = 0x00200000
-	wsBorder        = 0x00800000
 	wsTabStop       = 0x00010000
-	esAutoHScroll   = 0x0080
 	wsExDlgModalFrm = 0x00000001
 
 	idGenCombo      = 2001

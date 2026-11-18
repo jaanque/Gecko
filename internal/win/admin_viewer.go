@@ -26,17 +26,14 @@ var (
 	procReleaseCapture      = user32GUI.NewProc("ReleaseCapture")
 	procSetFocus            = user32GUI.NewProc("SetFocus")
 	procSetCursor           = user32GUI.NewProc("SetCursor")
-	procSetWindowTextW      = user32GUI.NewProc("SetWindowTextW")
 	procGetWindowLongW      = user32GUI.NewProc("GetWindowLongW")
 	procSetWindowLongW      = user32GUI.NewProc("SetWindowLongW")
 )
 
 const (
 	wsOverlappedWindow = 0x00CF0000
-	wsPopup            = 0x80000000
 
 	wmSize         = 0x0005
-	wmSetFocus     = 0x0007
 	wmKillFocus    = 0x0008
 	wmEraseBkgnd   = 0x0014
 	wmGetMinMaxInf = 0x0024
