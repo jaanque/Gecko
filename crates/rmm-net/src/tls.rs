@@ -21,8 +21,8 @@ fn install_ring_provider() {
 /// - Bounded receive/send datagram buffers so old video frames never queue up
 fn build_transport_config() -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
-    transport.max_idle_timeout(Some(VarInt::from_u32(25_000).into()));
+    transport.keep_alive_interval(Some(Duration::from_secs(2)));
+    transport.max_idle_timeout(Some(VarInt::from_u32(10_000).into()));
     // Enable QUIC Unreliable Datagrams (RFC 9221)
     transport.datagram_receive_buffer_size(Some(2 * 1024 * 1024));
     transport.datagram_send_buffer_size(2 * 1024 * 1024);

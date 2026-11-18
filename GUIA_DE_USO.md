@@ -1,227 +1,152 @@
-# Guía Completa de Uso y Arranque — Gecko
+# Guía Completa de Uso y Arranque — Gecko (100% Nativo)
 
-Esta guía explica **todo paso a paso desde el punto de vista del Administrador**: cómo abrir la pantalla de Gecko (tanto en modo desarrollo como en ejecutable/instalador de escritorio), cómo recorrer su interfaz, cómo generar clientes *Zero-Config*, cómo conectarte y controlar un equipo remoto, cómo configurar tu red y cómo resolver cualquier incidencia.
+**Gecko** es un sistema de control remoto de escritorio **100% nativo en Rust** tanto en el **Administrador (`Gecko.exe`)** como en el **Cliente (`Gecko-*.exe`)** — sin navegador, sin Node.js, sin WebView y sin servidores intermedios.
 
 ---
 
 ## 1. ¿Cómo abro la pantalla de Admin de Gecko?
 
-Tienes **dos formas** de abrir la aplicación de escritorio **Gecko** en tu PC de Administrador:
+Tienes **dos formas directas** de abrir la aplicación de escritorio **Gecko** en tu PC de Administrador:
 
-### Opción A — Abrirla ahora mismo (Modo Desarrollo, en 1 comando)
+### Opción A — Doble clic en el ejecutable nativo (Recomendado)
 
-Ideal para probar o desarrollar sin esperar a generar un instalador.
+Tras compilar (ya está compilado en `dist-gecko\`), solo abre esta carpeta en el Explorador de Windows y haz **doble clic en `Gecko.exe`**:
 
-1. Abre **PowerShell** (o la terminal integrada de tu editor).
-2. Ejecuta estos dos comandos:
-
-```powershell
-cd c:\Users\JAN\Desktop\remote\apps\admin
-npx.cmd tauri dev
+```text
+c:\Users\JAN\Desktop\remote\dist-gecko\Gecko.exe
 ```
 
-3. **Qué verás al ejecutarlo:**
-   - La primera vez tardará ~20–40 segundos mientras compila el binario nativo de Tauri. Las siguientes veces abrirá en pocos segundos.
-   - Se abrirá automáticamente la **ventana de escritorio de Gecko** (fondo oscuro, barra lateral izquierda con el logo **G Gecko**).
-   - Al mismo tiempo, dentro de esa misma ventana arranca el **servidor QUIC embebido** escuchando en **`UDP :4433`**.
+*(Mantén la subcarpeta `resources\agent_stub.exe` al lado de `Gecko.exe` para que el botón **Generar Cliente** funcione desde cualquier carpeta donde muevas `dist-gecko\`.)*
 
-> **Importante:** No abras `http://localhost:5173` en Chrome/Edge. Aunque Vite levanta ese puerto internamente para servir la interfaz a Tauri, **toda la lógica nativa (servidor QUIC, generador de `.exe` y streaming binario)** solo existe dentro de la ventana de escritorio de **Gecko** que abre `npx.cmd tauri dev`.
-
-> **Nota sobre PowerShell:** Si Windows bloquea scripts `.ps1`, usa siempre **`npm.cmd`** y **`npx.cmd`** (nunca `npm` ni `npx` a secas).
-
----
-
-### Opción B — Compilarla como app de escritorio normal (para abrir con doble clic)
-
-Si quieres tener **Gecko** como un programa normal de Windows (con acceso directo o instalador, sin abrir nunca la terminal):
-
-1. Ejecuta el script de compilación completa desde PowerShell:
+Si quieres recompilar `dist-gecko\` tras hacer cambios en el código:
 
 ```powershell
 cd c:\Users\JAN\Desktop\remote
 powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
 ```
 
-2. Al terminar, encontrarás tu aplicación lista en estas rutas:
-   - **Ejecutable directo (sin instalar):**
-     ```text
-     c:\Users\JAN\Desktop\remote\target\release\rmm-admin.exe
-     ```
-     *(Puedes renombrarlo a `Gecko.exe` o crear un acceso directo en tu Escritorio; asegúrate de mantener al lado la carpeta `resources\agent_stub.exe` o usar el instalador).*
-   - **Instalador de Windows (recomendado — incluye `agent_stub.exe` empaquetado):**
-     ```text
-     c:\Users\JAN\Desktop\remote\target\release\bundle\nsis\Gecko_0.1.0_x64-setup.exe
-     c:\Users\JAN\Desktop\remote\target\release\bundle\msi\Gecko_0.1.0_x64_en-US.msi
-     ```
-3. Instala `Gecko_0.1.0_x64-setup.exe` y ya podrás abrir **Gecko** desde el Menú Inicio o Escritorio con un simple **doble clic**.
+---
+
+### Opción B — Abrirla desde terminal en modo desarrollo
+
+```powershell
+cd c:\Users\JAN\Desktop\remote
+cargo run -p gecko-admin
+```
+
+Al abrirse la ventana de escritorio **Gecko**, arrancan automáticamente en segundo plano dentro del mismo proceso:
+- **Servidor QUIC de conexión inversa** en **`UDP :4433`** (TLS 1.3 + *certificate pinning*).
+- **Auto-Discovery LAN firmado** en **`UDP :4434`** (permite que los clientes te encuentren automáticamente en tu red local incluso si cambia tu IP de Wi-Fi/DHCP).
 
 ---
 
-## 2. Qué ves al abrir la pantalla de Gecko Admin
-
-En cuanto se abre la ventana principal, verás dos zonas claras:
+## 2. Qué ves en la pantalla de Gecko Admin
 
 ### Barra lateral izquierda
-1. **Logo `G Gecko [QUIC]`** en la parte superior.
-2. **Botón verde `Generar Cliente`**: abre el asistente para fabricar un ejecutable cliente listo para enviar.
-3. **Navegación**:
-   - **`Equipos Online`** (con contador en vivo): lista en tiempo real de todos los PCs conectados a tu máquina.
-   - **`Clientes Emitidos`**: historial de todos los `.exe` que has generado, con botón para localizar el archivo y botón **Revocar** para invalidar su acceso en el acto.
-4. **Tarjeta `Backend Embebido` (abajo a la izquierda)**:
-   - **`UDP :4433`**: confirma que tu servidor de conexión inversa está escuchando.
-   - **`IP LAN`**: tu IP local detectada automáticamente.
-   - **`Stub: Listo`**: confirma que la plantilla precompilada (`agent_stub.exe`) está disponible para inyectar configuraciones en milisegundos.
-   - **Huella SHA-256 (icono escudo)**: huella del certificado TLS 1.3 de tu servidor (puedes hacer clic para copiarla).
-
-### Zona principal derecha
-- Mientras no haya equipos conectados, muestra *"Esperando conexiones inversas en UDP :4433"* y un botón rápido **"Generar primer cliente"**.
-- En cuanto un usuario ejecuta su `.exe`, su tarjeta aparece aquí automáticamente con estado **`Online`** pulsante.
+1. **Logo `G Gecko [NATIVO]`**.
+2. **Botón verde `+ Generar Cliente (.EXE)`**: genera un ejecutable cliente listo para enviar en <100 ms.
+3. **Pestañas**:
+   - **`Equipos`**: muestra los equipos **ONLINE** (con latencia RTT en tiempo real) y debajo el historial de equipos **RECONOCIDOS OFFLINE** (identificados de forma persistente por su `machine_id` de hardware).
+   - **`Clientes Emitidos`**: listado de todos los `.exe` generados, con botón **Abrir Archivo** y botón **Revocar** para cortar el acceso permanentemente.
+4. **Tarjeta `Backend QUIC Activo` (abajo a la izquierda)**:
+   - Puerto **`QUIC UDP :4433`** y **`Auto-LAN UDP :4434`**.
+   - Tu **`IP Local`** detectada automáticamente.
+   - Estado de la plantilla **`Stub OK`**.
+   - Botón para copiar la huella criptográfica **TLS SHA-256**.
 
 ---
 
-## 3. Paso a paso: Generar un Cliente y Tomar el Control
+## 3. Paso a paso: Generar Cliente, Conectar y Controlar
 
-### Paso 1 — Generar el ejecutable cliente (en tu pantalla Admin)
-1. Pulsa el botón verde **`Generar Cliente`**.
-2. Rellena los campos del modal:
-   - **Etiqueta del Cliente:** un nombre para identificar al equipo o empresa (ej. `PC Oficina Juan` o `Prueba Local`).
-   - **Nombre del Administrador:** el nombre que verá el usuario final en su bandeja del sistema (ej. `Soporte IT`).
-   - **Endpoints de Conexión Inversa:** la dirección `IP:puerto` o `dominio:puerto` a la que se conectará el cliente:
-     - **Para probar en tu mismo PC:** usa `127.0.0.1:4433` (puedes pulsar la píldora `+ 127.0.0.1:4433` debajo del cuadro).
-     - **Para otro PC en tu Wi-Fi/oficina (LAN):** usa tu IP local que aparece sugerida (ej. `192.168.1.50:4433`).
-     - **Para un PC fuera de tu red (Internet):** pon tu dominio DDNS o IP pública `:4433` (o tu IP de Tailscale/WireGuard `:4433`).
-     - *Truco:* puedes poner **varias líneas** (ej. línea 1 IP LAN, línea 2 dominio público); el cliente probará una tras otra automáticamente si la primera no responde.
-   - **Nombre del Ejecutable:** se rellena solo (ej. `Gecko-Prueba-Local.exe`).
-   - **Caducidad del Token:** elige cuánto tiempo será válido ese ejecutable (`1 hora`, `24 horas`, `7 días` o `Sin caducidad`).
-3. Pulsa **`Generar .EXE`**.
-   - En menos de 100 ms, Gecko toma `agent_stub.exe`, firma la configuración con tu clave privada **Ed25519** y la anexa al final del binario.
-4. Pulsa **`Abrir en Explorador`** para ir directo al `.exe` generado (se guarda en `%LOCALAPPDATA%\gecko\admin\data\generated-clients\`).
+### Paso 1 — Generar el ejecutable cliente (`Gecko-*.exe`)
+1. Pulsa **`+ Generar Cliente (.EXE)`**.
+2. Configura:
+   - **Etiqueta del Cliente:** nombre descriptivo (ej. `PC Oficina`, `Prueba Local`).
+   - **Nombre del Administrador:** se muestra en la bandeja del sistema del cliente para transparencia.
+   - **Endpoints del Admin:**
+     - **En tu mismo PC:** `127.0.0.1:4433` (puedes pulsar `+ 127.0.0.1:4433`).
+     - **En otro PC de tu LAN/Wi-Fi:** tu IP local sugerida (ej. `192.168.1.50:4433`). Además, gracias al **Auto-Discovery LAN**, aunque cambie tu IP local el agente te reencontrará solo.
+     - **Por Internet (WAN):** tu dominio DDNS o IP pública `:4433` (o IP Tailscale/WireGuard `:4433`). Puedes poner varias líneas (1 por línea) para *failover* automático.
+   - **Caducidad:** `1 hora`, `24 horas`, `7 días` o `Sin caducidad`.
+3. Pulsa **`Generar .EXE`** y luego **`Abrir en Explorador`**.
 
-### Paso 2 — Ejecutar el cliente (en tu PC para pruebas, o en el PC del usuario)
-1. Envía ese único archivo `.exe` (~2.12 MB) al usuario final por correo, chat, enlace o USB (o ejecútalo tú mismo si estás probando en local).
-2. El usuario hace **doble clic**.
-   - **No instala nada.**
-   - **No pide IDs, ni IPs, ni contraseñas.**
-   - Aparece un icono discreto en la bandeja del sistema de Windows (junto al reloj) indicando `Gecko — Online (Soporte IT)`.
-   - El usuario puede hacer **clic derecho sobre el icono → `Desconectar y Salir`** en cualquier momento para cortar el acceso.
+### Paso 2 — Ejecutar el cliente (Zero-Config)
+1. Envía el `.exe` (~2.1 MB, sin dependencias) al equipo remoto y haz **doble clic**.
+2. No pide IDs, contraseñas ni instalación. Aparece un icono discreto en la bandeja del sistema de Windows (`Gecko — Online`) desde el cual el usuario puede elegir **Clic derecho → Desconectar y Salir** en cualquier momento.
+3. En tu pantalla **Gecko Admin**, el equipo aparece al instante bajo **`ONLINE`** (si ese equipo se reconecta más tarde, Gecko lo reconoce por su `machine_id` sin crear duplicados).
 
-### Paso 3 — Ver el equipo Online y tomar el control (en tu pantalla Admin)
-1. En tu panel **Gecko**, el equipo aparece al instante en **`Equipos Online`** mostrando:
-   - Nombre del PC (`Hostname`) y usuario de Windows.
-   - Etiqueta con la que generaste el cliente.
-   - Tarjeta gráfica (GPU), cantidad de monitores, IP remota y latencia **RTT en ms**.
-2. Haz **doble clic sobre la tarjeta del equipo** (o pulsa el botón **`Controlar`**).
-3. Se abre automáticamente el **Visor de Control Remoto** a pantalla completa dentro de la app:
-   - El agente remoto captura directamente desde VRAM (**DXGI Desktop Duplication → NV12 en GPU → NVENC/AMF/QuickSync**) y envía los fotogramas por **datagramas QUIC**.
-   - Tu aplicación Admin decodifica por hardware (**WebCodecs**) y ya puedes mover el ratón, hacer clic, hacer scroll y escribir (incluso con distinto idioma de teclado gracias a los *Hardware Scan Codes*).
+### Paso 3 — Entrar en control remoto y usar ratón y teclado
+1. Haz **doble clic** en la tarjeta del equipo o pulsa **`▶ Controlar`**.
+2. Se abre el **Visor Remoto Nativo** (decodificación H.264/HEVC nativa por Windows Media Foundation renderizada en GPU):
+   - **En cualquier equipo remoto:** el control de ratón y teclado está **ACTIVO automáticamente**. Solo coloca el puntero sobre la pantalla remota para mover el ratón, hacer clic izquierdo/derecho/central, arrastrar, usar la rueda y escribir (incluye `Shift`, `Ctrl`, `Alt`, `Win`, flechas y teclas de función independientes del idioma del teclado).
+   - **Si estás probando en tu mismo PC (`ESTE PC`):** para evitar un bucle donde tu ratón se persigue a sí mismo, el control arranca en modo **`Control: PAUSADO (F9)`**; pulsa **`F9`** o el botón de la barra superior cuando quieras activar/pausar el control de ratón y teclado.
 
 ---
 
-## 4. Controles del Visor Remoto y Gestión de Sesiones
+## 4. Controles de la Barra Superior del Visor
 
-### Barra flotante superior del visor
 | Control | Función |
 | :--- | :--- |
-| **Nombre + punto verde** | Equipo y usuario que estás controlando. |
-| **Chip de Encoder** | Muestra qué codificador hardware está activo en el cliente (`NVIDIA`, `AMD`, `Intel Quick Sync` o fallback software). |
-| **Selector `#1` `#2`** | Aparece si el cliente tiene varios monitores; permite cambiar de pantalla al instante. |
-| **Bitrate (`4`–`35 Mbps`)** | Ajusta la calidad/ancho de banda del codificador hardware en vivo sin reiniciar la sesión. |
-| **FPS (`30` / `60` / `120`)** | Cambia la tasa de fotogramas objetivo al vuelo. |
-| **Icono refresco (IDR)** | Fuerza un fotograma clave inmediato si hubo un pico de pérdida de red. |
-| **Icono pulso (HUD)** | Muestra u oculta el panel técnico inferior izquierdo (FPS reales, RTT en ms, tiempo de captura DXGI, tiempo de encode GPU, bitrate real y resolución). |
-| **Pantalla completa** | Expande el visor a pantalla completa real (`Esc` o el mismo botón para salir). |
-| **Botón rojo `Finalizar`** | Detiene la transmisión de video y vuelve al Dashboard (el equipo remoto sigue `Online` listo para reconectar). |
-
-### Desconectar o Revocar un Cliente
-- **Desconectar sesión temporalmente:** pasa el ratón sobre la tarjeta del equipo en el dashboard y pulsa el icono de papelera arriba a la derecha.
-- **Revocar un `.exe` permanentemente:** entra en **`Clientes Emitidos`** en la barra lateral y pulsa **`Revocar`** junto al cliente que quieras bloquear. Si estaba conectado, se desconecta al instante y ese `.exe` nunca podrá volver a entrar.
+| **Nombre + Encoder** | Muestra el PC remoto y el codificador hardware activo (`NVIDIA`, `AMD`, `Intel Quick Sync`). |
+| **`#1` `#2`** | Cambia entre monitores si el equipo remoto tiene varias pantallas. |
+| **`4`–`35 Mbps` / `30`–`120 FPS`** | Ajusta bitrate y tasa de refresco del encoder hardware al vuelo sin cortar la sesión. |
+| **`Control: ACTIVO / PAUSADO (F9)`** | Activa o pausa la inyección de ratón y teclado con un clic o pulsando `F9`. |
+| **`IDR`** | Fuerza un fotograma clave inmediato. |
+| **`HUD ✓`** | Muestra u oculta la barra inferior con métricas en vivo (`FPS`, `RTT`, `CAP`, `ENC`, `DEC`, `RATE` y resolución). |
+| **`Pantalla Completa`** | Expande el visor a pantalla completa real. |
+| **`Finalizar`** | Detiene el streaming de video y vuelve al dashboard (el equipo sigue `Online`). |
 
 ---
 
-## 5. Configuración de Red (Local, LAN e Internet)
+## 5. Firewall y Red (LAN e Internet)
 
-El cliente remoto **nunca** requiere configuración de red ni abrir puertos (hace conexión saliente). Solo la máquina del **Administrador** recibe conexiones UDP en el puerto **4433**:
+El equipo **Cliente nunca necesita abrir puertos**. Solo el PC del **Administrador** recibe tráfico UDP entrante:
 
-### En Red Local (LAN / Wi-Fi)
-Abre el puerto **UDP 4433** en el Firewall de Windows del PC del Administrador (PowerShell como Administrador, una sola vez):
-
+### Abrir puertos en Windows Firewall del Administrador (PowerShell como Administrador, una sola vez)
 ```powershell
 New-NetFirewallRule -DisplayName "Gecko Admin QUIC (UDP 4433)" -Direction Inbound -Protocol UDP -LocalPort 4433 -Action Allow
+New-NetFirewallRule -DisplayName "Gecko Admin Auto-LAN (UDP 4434)" -Direction Inbound -Protocol UDP -LocalPort 4434 -Action Allow
 ```
 
-### Por Internet (WAN)
-Elige la opción que mejor se adapte a tu red:
-- **Router con IP pública / DDNS:** abre y redirige el puerto **UDP 4433** en tu router hacia la IP local del PC del Administrador, y usa `tu-dominio.ddns.net:4433` al generar clientes.
-- **Sin abrir puertos en router (CGNAT):** usa una red privada tipo **Tailscale** o **WireGuard** y coloca la IP VPN del Administrador (ej. `100.x.y.z:4433`) en los endpoints.
+### Conexión por Internet (WAN)
+- **Router con IP pública / DDNS:** redirige el puerto **UDP 4433** en tu router hacia la IP local del PC Admin y pon `tu-dominio.ddns.net:4433` en Endpoints.
+- **Sin abrir puertos en router (CGNAT):** usa Tailscale o WireGuard y coloca la IP VPN del Admin (`100.x.y.z:4433`).
 
-### Cambiar el puerto UDP o activar logs detallados (opcional)
+### Variables de entorno opcionales
 ```powershell
 $env:GECKO_PORT = "4433"
-$env:RUST_LOG = "rmm_admin=debug,rmm_net=debug"
-cd c:\Users\JAN\Desktop\remote\apps\admin
-npx.cmd tauri dev
+$env:GECKO_DISCOVERY_PORT = "4434"
+$env:RUST_LOG = "gecko_admin=debug,rmm_net=debug"
+cargo run -p gecko-admin
 ```
 
 ---
 
-## 6. Requisitos y Comandos para Desarrollo
+## 6. Datos Persistentes y Tests
 
-### Requisitos previos
-- **Rust / Cargo** (`x86_64-pc-windows-msvc`).
-- **Visual Studio Build Tools** (*Desarrollo de escritorio con C++*).
-- **Node.js 20+** (`npm.cmd` / `npx.cmd`).
-- **WebView2 Runtime** (incluido en Windows 10/11).
-
-### Si modificas el código del Agente (`apps/agent` o `crates/*`)
-Debes recompilar el stub `agent_stub.exe` para que los nuevos clientes que generes incluyan tus cambios:
-
-```powershell
-cd c:\Users\JAN\Desktop\remote
-$env:RUSTFLAGS = "-C target-feature=+crt-static"
-cargo build -p rmm-agent --profile release-agent
-Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
-Copy-Item -Force "target\release-agent\rmm-agent.exe" "apps\admin\src-tauri\resources\agent_stub.exe"
-```
-
-### Ejecutar tests y verificaciones
-```powershell
-cd c:\Users\JAN\Desktop\remote
-
-# Verificar todo el workspace Rust (7 paquetes)
-cargo check --workspace
-
-# Ejecutar tests unitarios e integración (overlay Ed25519, reensamblador, QUIC TLS Pinning)
-cargo test -p rmm-proto -p rmm-net
-
-# Verificar TypeScript y compilar frontend React
-npm.cmd --prefix apps\admin run build
-```
-
----
-
-## 7. Dónde se guardan tus datos y archivos generados
-
-Gecko guarda automáticamente su identidad criptográfica y archivos en:
+Gecko guarda sus datos locales del Administrador en:
 
 ```text
 %LOCALAPPDATA%\gecko\admin\data\
-├── admin_identity.json     # Clave privada Ed25519 + certificado TLS 1.3 (pinning persistente)
-├── issued_tokens.json      # Historial de clientes generados y lista de revocación
-└── generated-clients\      # Todos los archivos Gecko-*.exe generados
+├── admin_identity.json     # Clave Ed25519 + certificado TLS 1.3 (pinning persistente)
+├── known_devices.json      # Historial de equipos reconocidos (machine_id, GPU, última conexión)
+├── issued_tokens.json      # Registro de clientes emitidos y revocaciones
+└── generated-clients\      # Ejecutables Gecko-*.exe generados
 ```
 
-> **Importante:** No borres `admin_identity.json` salvo que quieras invalidar todos los clientes `.exe` generados anteriormente (si se borra, Gecko creará un nuevo certificado TLS y una nueva clave Ed25519 al volver a abrirse).
+### Ejecutar tests automatizados
+```powershell
+cd c:\Users\JAN\Desktop\remote
+cargo test -p rmm-proto -p rmm-net
+```
 
 ---
 
-## 8. Solución de Problemas Frecuentes
+## 7. Solución de Problemas Frecuentes
 
 | Problema | Causa habitual | Solución |
 | :--- | :--- | :--- |
-| Abrí `localhost:5173` en Chrome y no funciona nada | El navegador normal no tiene el backend nativo de Tauri ni el servidor QUIC. | Usa la **ventana de escritorio de Gecko** que abre `npx.cmd tauri dev` (o el ejecutable compilado). |
-| PowerShell bloquea `npm` o `npx` (*UnauthorizedAccess*) | Política de ejecución de scripts `.ps1` de Windows. | Usa siempre **`npm.cmd`** y **`npx.cmd`**. |
-| El cliente se abre pero nunca sale `Online` en LAN | Firewall de Windows del Admin bloqueando **UDP 4433** o IP incorrecta en Endpoints. | Crea la regla de firewall de la Sección 5 y verifica tu IP LAN en la barra lateral de Gecko. |
-| En prueba local (`127.0.0.1`) veo "efecto espejo infinito" | Estás capturando la misma pantalla donde tienes abierto el visor Admin. | Normal al probar en un único PC con un solo monitor; mueve/redimensiona la ventana o prueba con un segundo monitor o segundo PC. |
-| No puedo hacer clic en ventanas de Administrador o UAC del cliente | El cliente se abrió sin privilegios elevados (protección UIPI de Windows). | Ejecuta el `.exe` cliente con *Clic derecho → Ejecutar como administrador* cuando necesites controlar diálogos UAC o apps elevadas. |
-| Windows SmartScreen muestra aviso azul al ejecutar el `.exe` en otro PC | El ejecutable no lleva firma digital Authenticode comercial. | En pruebas pulsa *Más información → Ejecutar de todas formas*. En producción firma el `.exe` resultante con tu certificado mediante `signtool`. |
-| Quiero ver logs en consola del Agente Cliente | En perfil Release el agente oculta la ventana negra (`windows_subsystem = "windows"`). | Compila en debug (`cargo build -p rmm-agent`), genera el cliente apuntando a ese stub y ejecútalo desde PowerShell con `$env:RUST_LOG="debug"`. |
+| El cliente se ejecuta en otro PC de la LAN pero no sale `Online` | Firewall de Windows del Admin bloqueando UDP `4433` / `4434`. | Ejecuta las 2 reglas de `New-NetFirewallRule` de la Sección 5 como Administrador. |
+| Al probar en mi mismo PC el ratón no se mueve al abrir el visor | Protección anti-bucle activada automáticamente cuando Admin y Cliente son el mismo PC (`ESTE PC`). | Pulsa **`F9`** o el botón **`Control: PAUSADO (F9)`** en la barra superior para activarlo/pausarlo. |
+| No puedo hacer clic en ventanas de Administrador o diálogos UAC del cliente | El cliente corre sin privilegios elevados (restricción UIPI de Windows). | Ejecuta el `.exe` cliente con *Clic derecho → Ejecutar como administrador* para controlar ventanas elevadas. |
+| SmartScreen muestra aviso en otro PC al abrir `Gecko-*.exe` | El binario no tiene firma Authenticode comercial. | Pulsa *Más información → Ejecutar de todas formas* en pruebas, o firma el `.exe` con `signtool` en producción. |

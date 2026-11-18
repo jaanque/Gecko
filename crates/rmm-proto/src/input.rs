@@ -36,10 +36,12 @@ pub enum CriticalInputEvent {
 }
 
 /// Ultra-low-latency mouse movement sent as an UNRELIABLE QUIC datagram (no HoL blocking).
-/// Fixed 9 bytes on wire: `[0x02, display_idx(u8), x_le(2), y_le(2), seq_le(2), flags(1)]`.
+/// Fixed 9 bytes on wire: `[0x02, display_idx(u8), epoch(u8), x_le(2), y_le(2), seq_le(2)]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseMoveDatagram {
     pub display_index: u8,
+    /// Session epoch incremented every time a remote control session starts.
+    pub epoch: u8,
     /// Normalized 0..65535 coordinate within the active display.
     pub x: u16,
     /// Normalized 0..65535 coordinate within the active display.
@@ -49,16 +51,17 @@ pub struct MouseMoveDatagram {
 }
 
 impl MouseMoveDatagram {
-    pub const WIRE_LEN: usize = 8;
+    pub const WIRE_LEN: usize = 9;
     pub const MSG_TYPE: u8 = 0x02;
 
     pub fn encode(&self) -> [u8; Self::WIRE_LEN] {
         let mut buf = [0u8; Self::WIRE_LEN];
         buf[0] = Self::MSG_TYPE;
         buf[1] = self.display_index;
-        buf[2..4].copy_from_slice(&self.x.to_le_bytes());
-        buf[4..6].copy_from_slice(&self.y.to_le_bytes());
-        buf[6..8].copy_from_slice(&self.seq.to_le_bytes());
+        buf[2] = self.epoch;
+        buf[3..5].copy_from_slice(&self.x.to_le_bytes());
+        buf[5..7].copy_from_slice(&self.y.to_le_bytes());
+        buf[7..9].copy_from_slice(&self.seq.to_le_bytes());
         buf
     }
 
@@ -68,9 +71,10 @@ impl MouseMoveDatagram {
         }
         Some(Self {
             display_index: buf[1],
-            x: u16::from_le_bytes([buf[2], buf[3]]),
-            y: u16::from_le_bytes([buf[4], buf[5]]),
-            seq: u16::from_le_bytes([buf[6], buf[7]]),
+            epoch: buf[2],
+            x: u16::from_le_bytes([buf[3], buf[4]]),
+            y: u16::from_le_bytes([buf[5], buf[6]]),
+            seq: u16::from_le_bytes([buf[7], buf[8]]),
         })
     }
 }

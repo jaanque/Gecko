@@ -13,15 +13,15 @@ use parking_lot::Mutex;
 use quinn::Endpoint;
 use rmm_capture_win::{enumerate_displays_and_gpu, CaptureFrameResult, DxgiZeroCopyCapturer};
 use rmm_encode_win::MfHardwareEncoder;
-use rmm_input_win::WinInputInjector;
+use rmm_input_win::{compute_machine_id, enable_per_monitor_dpi_awareness, WinInputInjector};
 use rmm_net::{
-    build_pinned_client_config, fragment_video_frame, read_framed, write_framed,
-    DEFAULT_MAX_DATAGRAM_BYTES,
+    build_pinned_client_config, discover_admin_on_lan, fragment_video_frame, read_framed,
+    write_framed, DEFAULT_MAX_DATAGRAM_BYTES,
 };
 use rmm_proto::{
     read_config_from_current_exe, AdminControlMsg, AgentControlMsg, CriticalInputEvent,
-    CursorPosDatagram, MouseMoveDatagram, SignedAgentConfig, VideoCodec,
-    DATAGRAM_MOUSE_MOVE, PROTOCOL_VERSION, VIDEO_FLAG_HEVC, VIDEO_FLAG_KEYFRAME,
+    CursorPosDatagram, MouseMoveDatagram, SignedAgentConfig, VideoCodec, DATAGRAM_MOUSE_MOVE,
+    DEFAULT_DISCOVERY_PORT, PROTOCOL_VERSION, VIDEO_FLAG_HEVC, VIDEO_FLAG_KEYFRAME,
 };
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -39,16 +39,21 @@ struct StreamCommandState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Enable Per-Monitor DPI Awareness V2 BEFORE any Win32/DXGI calls so mouse coordinates
+    // map 1:1 with physical pixels on 125%/150%/200% scaled displays.
+    enable_per_monitor_dpi_awareness();
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rmm_agent=info,rmm_net=info,rmm_capture_win=info,rmm_encode_win=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "rmm_agent=info,rmm_net=info,rmm_capture_win=info,rmm_encode_win=info".into()
+            }),
         )
         .init();
 
     // 1. Read Zero-Config signed overlay embedded at the tail of this executable.
     let config = read_config_from_current_exe().context(
-        "No valid embedded RMM configuration found. Generate this executable from the Admin Panel.",
+        "No valid embedded Gecko configuration found. Generate this executable from Gecko Admin.",
     )?;
 
     let now_unix = SystemTime::now()
@@ -56,6 +61,9 @@ async fn main() -> Result<()> {
         .unwrap_or_default()
         .as_secs();
     config.check_not_expired(now_unix)?;
+
+    let machine_id = compute_machine_id();
+    let agent_id = *Uuid::new_v4().as_bytes();
 
     info!(
         label = %config.data.label,
@@ -70,31 +78,54 @@ async fn main() -> Result<()> {
         shutdown.clone(),
     );
 
-    let agent_id = *Uuid::new_v4().as_bytes();
     let client_cfg = build_pinned_client_config(config.data.admin_cert_sha256)?;
-
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse::<SocketAddr>()?)?;
     endpoint.set_default_client_config(client_cfg);
 
-    // 2. Resilient Phone-Home loop with exponential backoff.
-    let mut backoff_ms = 500u64;
-    let mut ep_idx = 0usize;
+    // 2. Resilient Phone-Home loop: tries configured endpoints + automatic LAN discovery fallback.
+    let mut backoff_ms = 400u64;
+    let mut last_working_addr: Option<SocketAddr> = None;
 
     while !shutdown.load(Ordering::Relaxed) {
-        if config.data.endpoints.is_empty() {
-            error!("Configuration contains no Admin endpoints");
-            break;
-        }
-        let target = &config.data.endpoints[ep_idx % config.data.endpoints.len()];
-        ep_idx = ep_idx.wrapping_add(1);
+        let target_addr = match resolve_next_admin_addr(
+            &config,
+            last_working_addr,
+        )
+        .await
+        {
+            Some(addr) => addr,
+            None => {
+                tray.update_status(&format!(
+                    "Gecko — Buscando a {}...",
+                    config.data.admin_name
+                ));
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(5_000);
+                continue;
+            }
+        };
 
-        match connect_and_serve(&endpoint, target, agent_id, &config, &shutdown, &tray).await {
+        match connect_and_serve(
+            &endpoint,
+            target_addr,
+            machine_id,
+            agent_id,
+            &config,
+            &shutdown,
+            &tray,
+        )
+        .await
+        {
             Ok(()) => {
                 info!("Session closed cleanly");
-                backoff_ms = 500;
+                last_working_addr = Some(target_addr);
+                backoff_ms = 400;
             }
             Err(e) => {
-                warn!(target = %target, error = %e, "Connection cycle ended");
+                warn!(%target_addr, error = %e, "Connection cycle ended");
+                if last_working_addr == Some(target_addr) {
+                    last_working_addr = None;
+                }
             }
         }
 
@@ -107,7 +138,7 @@ async fn main() -> Result<()> {
             config.data.admin_name
         ));
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-        backoff_ms = (backoff_ms * 2).min(10_000);
+        backoff_ms = (backoff_ms * 2).min(5_000);
     }
 
     tray.stop();
@@ -115,22 +146,56 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Resolve the best reachable Admin SocketAddr:
+/// 1. Last known working address (if any)
+/// 2. Signed LAN Auto-Discovery (instant <100ms in LAN even if Admin's DHCP IP changed!)
+/// 3. Configured endpoints (DNS/IP list in overlay)
+async fn resolve_next_admin_addr(
+    config: &SignedAgentConfig,
+    last_working: Option<SocketAddr>,
+) -> Option<SocketAddr> {
+    if let Some(addr) = last_working {
+        return Some(addr);
+    }
+
+    // Try fast signed LAN discovery first (400ms timeout) — handles IP changes transparently
+    if let Some(lan_addr) = discover_admin_on_lan(
+        config.data.admin_cert_sha256,
+        DEFAULT_DISCOVERY_PORT,
+        Duration::from_millis(450),
+    )
+    .await
+    {
+        info!(%lan_addr, "Auto-discovered Gecko Admin on local LAN");
+        return Some(lan_addr);
+    }
+
+    // Fall back to configured static/DDNS endpoints
+    for ep in &config.data.endpoints {
+        if let Ok(mut addrs) = tokio::net::lookup_host(ep).await {
+            if let Some(addr) = addrs.next() {
+                return Some(addr);
+            }
+        }
+    }
+
+    None
+}
+
 async fn connect_and_serve(
     endpoint: &Endpoint,
-    target_addr: &str,
+    resolved: SocketAddr,
+    machine_id: [u8; 16],
     agent_id: [u8; 16],
     config: &SignedAgentConfig,
     shutdown: &Arc<AtomicBool>,
     tray: &tray::TrayController,
 ) -> Result<()> {
-    let resolved: SocketAddr = tokio::net::lookup_host(target_addr)
-        .await
-        .with_context(|| format!("DNS lookup failed for {target_addr}"))?
-        .next()
-        .ok_or_else(|| anyhow!("No IP resolved for {target_addr}"))?;
-
     info!(%resolved, "Initiating reverse QUIC connection (Phone Home)");
-    let conn = endpoint.connect(resolved, "gecko-admin.local")?.await?;
+    let connecting = endpoint.connect(resolved, "gecko-admin.local")?;
+    let conn = tokio::time::timeout(Duration::from_secs(4), connecting)
+        .await
+        .map_err(|_| anyhow!("Connection timed out to {resolved}"))??;
     info!(%resolved, "QUIC TLS 1.3 tunnel established with pinned certificate");
 
     // Open bidirectional Control Stream #0
@@ -141,6 +206,7 @@ async fn connect_and_serve(
 
     let hello = AgentControlMsg::Hello {
         protocol_version: PROTOCOL_VERSION,
+        machine_id,
         agent_id,
         token_id: config.data.token_id,
         label: config.data.label.clone(),
@@ -164,11 +230,8 @@ async fn connect_and_serve(
         AdminControlMsg::Welcome {
             accepted: true, ..
         } => {
-            info!("Registered as Online in Admin Dashboard");
-            tray.update_status(&format!(
-                "Gecko — Online ({})",
-                config.data.admin_name
-            ));
+            info!("Registered as Online in Gecko Admin");
+            tray.update_status(&format!("Gecko — Online ({})", config.data.admin_name));
         }
         AdminControlMsg::Welcome {
             accepted: false,
@@ -185,7 +248,6 @@ async fn connect_and_serve(
         }
     }
 
-    // Channel for sending outbound Control messages safely from multiple tasks/threads
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<AgentControlMsg>(64);
     let ctrl_writer = tokio::spawn(async move {
         while let Some(msg) = ctrl_rx.recv().await {
@@ -229,10 +291,8 @@ async fn connect_and_serve(
         }
     });
 
-    // Active video capture/encode worker state
     let mut active_stream: Option<StreamCommandState> = None;
 
-    // Control Stream Reader Loop + User Shutdown watcher
     loop {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
@@ -261,8 +321,12 @@ async fn connect_and_serve(
                         if let Some(prev) = active_stream.take() {
                             prev.stop_flag.store(true, Ordering::Release);
                         }
-                        if let Some(d) = displays.iter().find(|d| d.index == display_index) {
-                            injector.lock().set_active_display(Some(d.clone()));
+                        {
+                            let mut inj = injector.lock();
+                            inj.reset_session();
+                            if let Some(d) = displays.iter().find(|d| d.index == display_index) {
+                                inj.set_active_display(Some(d.clone()));
+                            }
                         }
 
                         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -298,7 +362,11 @@ async fn connect_and_serve(
                         if let Some(prev) = active_stream.take() {
                             prev.stop_flag.store(true, Ordering::Release);
                         }
-                        injector.lock().release_all();
+                        {
+                            let mut inj = injector.lock();
+                            inj.release_all();
+                            inj.reset_session();
+                        }
                         tray.update_status(&format!(
                             "Gecko — Online ({})",
                             config.data.admin_name
@@ -328,7 +396,6 @@ async fn connect_and_serve(
         }
     }
 
-    // Cleanup on disconnect: stop encoder & release any pressed keys/buttons
     if let Some(prev) = active_stream.take() {
         prev.stop_flag.store(true, Ordering::Release);
     }
@@ -353,7 +420,6 @@ fn spawn_capture_encode_pipeline(
     target_bitrate_kbps: Arc<AtomicU32>,
     target_fps: Arc<AtomicU32>,
 ) {
-    // Bounded channel (cap=2) to decouple GPU thread from QUIC packetizer without queue bloat.
     let (frame_tx, frame_rx): (
         Sender<(Vec<u8>, bool, u32)>,
         Receiver<(Vec<u8>, bool, u32)>,
@@ -363,7 +429,6 @@ fn spawn_capture_encode_pipeline(
     let stop_sender = stop_flag.clone();
     let is_hevc = codec == VideoCodec::Hevc;
 
-    // Datagram sender thread/task
     tokio::task::spawn_blocking(move || {
         let mut frame_id = 0u16;
         let max_dgram = conn_sender
@@ -395,9 +460,8 @@ fn spawn_capture_encode_pipeline(
         }
     });
 
-    // Dedicated OS thread for Zero-Copy DXGI Capture + Hardware Encode
     std::thread::Builder::new()
-        .name("rmm-gpu-pipeline".into())
+        .name("gecko-gpu-pipeline".into())
         .spawn(move || {
             unsafe {
                 let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
@@ -450,7 +514,6 @@ fn spawn_capture_encode_pipeline(
             let mut last_bitrate = initial_bitrate;
             let mut last_cursor_shape_id = 0u64;
 
-            // Telemetry accumulators (1s window)
             let mut stats_window_start = Instant::now();
             let mut frames_in_window = 0u32;
             let mut bytes_in_window = 0u64;
@@ -496,7 +559,6 @@ fn spawn_capture_encode_pipeline(
                                     sum_capture_ms += capture_ms;
                                     sum_encode_ms += ef.encode_ms;
 
-                                    // Drop-oldest backpressure: never stall GPU waiting on network!
                                     if frame_tx.try_send((ef.data, ef.is_keyframe, ts_us)).is_err() {
                                         dropped_in_window += 1;
                                     }
@@ -529,7 +591,6 @@ fn spawn_capture_encode_pipeline(
                     }
                 }
 
-                // Publish 1-second telemetry snapshot
                 let elapsed = stats_window_start.elapsed();
                 if elapsed >= Duration::from_secs(1) {
                     let secs = elapsed.as_secs_f32().max(0.001);
@@ -551,7 +612,6 @@ fn spawn_capture_encode_pipeline(
                     dropped_in_window = 0;
                 }
 
-                // Pace frame loop precisely
                 let spent = loop_start.elapsed();
                 if spent < frame_budget {
                     std::thread::sleep(frame_budget - spent);

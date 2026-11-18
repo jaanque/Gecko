@@ -2,6 +2,15 @@ use std::collections::HashSet;
 use std::mem::size_of;
 
 use rmm_proto::{CriticalInputEvent, DisplayInfo, MouseButton, MouseMoveDatagram};
+use sha2::{Digest, Sha256};
+use tracing::trace;
+use windows::core::w;
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_VALUE_TYPE,
+};
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE,
@@ -11,16 +20,90 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
 };
 
 const XBUTTON1: u32 = 0x0001;
 const XBUTTON2: u32 = 0x0002;
 
+/// Enable Per-Monitor DPI Awareness V2 so `GetSystemMetrics` and `SetCursorPos`
+/// match DXGI's physical desktop pixel coordinates 1:1 on high-DPI screens.
+pub fn enable_per_monitor_dpi_awareness() {
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+/// Compute a stable 16-byte deterministic machine fingerprint for this Windows PC
+/// (derived from HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid + fallback).
+pub fn compute_machine_id() -> [u8; 16] {
+    let guid = read_windows_machine_guid().unwrap_or_else(|| {
+        format!(
+            "{}:{}",
+            hostname::get().unwrap_or_default().to_string_lossy(),
+            whoami::username()
+        )
+    });
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"gecko-machine-id-v1:");
+    hasher.update(guid.as_bytes());
+    let digest = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    id
+}
+
+fn read_windows_machine_guid() -> Option<String> {
+    unsafe {
+        let mut hkey = HKEY::default();
+        let status = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\Microsoft\\Cryptography"),
+            0,
+            KEY_READ,
+            &mut hkey,
+        );
+        if status.is_err() {
+            return None;
+        }
+
+        let mut buf = [0u16; 128];
+        let mut byte_len = (buf.len() * 2) as u32;
+        let mut reg_type = REG_VALUE_TYPE::default();
+        let q = RegQueryValueExW(
+            hkey,
+            w!("MachineGuid"),
+            None,
+            Some(&mut reg_type),
+            Some(buf.as_mut_ptr() as *mut u8),
+            Some(&mut byte_len),
+        );
+        let _ = RegCloseKey(hkey);
+
+        if q.is_err() || byte_len < 2 {
+            return None;
+        }
+        let u16_len = (byte_len as usize / 2).min(buf.len());
+        let trimmed = buf[..u16_len]
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(u16_len);
+        let s = String::from_utf16_lossy(&buf[..trimmed]);
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
 /// High-precision, layout-independent Windows input injector with automatic stuck-key protection.
 pub struct WinInputInjector {
     held_keys: HashSet<(u16, bool)>,
     held_buttons: HashSet<MouseButton>,
+    last_move_epoch: Option<u8>,
     last_move_seq: Option<u16>,
     active_display: Option<DisplayInfo>,
 }
@@ -36,29 +119,44 @@ impl WinInputInjector {
         Self {
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
+            last_move_epoch: None,
             last_move_seq: None,
             active_display: None,
         }
+    }
+
+    pub fn reset_session(&mut self) {
+        self.last_move_epoch = None;
+        self.last_move_seq = None;
     }
 
     /// Update the active target display geometry so normalized coordinates (0..65535)
     /// map accurately onto the selected monitor within the Windows virtual desktop.
     pub fn set_active_display(&mut self, display: Option<DisplayInfo>) {
         self.active_display = display;
-        self.last_move_seq = None;
+        self.reset_session();
     }
 
-    /// Inject an unreliable mouse-move datagram, discarding stale out-of-order packets.
+    /// Inject an unreliable mouse-move datagram, discarding only stale out-of-order packets
+    /// within the same session epoch.
     pub fn handle_mouse_move(&mut self, msg: MouseMoveDatagram) {
-        if let Some(prev) = self.last_move_seq {
-            let diff = msg.seq.wrapping_sub(prev);
-            if diff == 0 || diff > 32_768 {
-                return;
+        let same_epoch = self.last_move_epoch == Some(msg.epoch);
+        if same_epoch {
+            if let Some(prev) = self.last_move_seq {
+                let diff = msg.seq.wrapping_sub(prev);
+                if diff == 0 || diff > 32_768 {
+                    return;
+                }
             }
         }
+        self.last_move_epoch = Some(msg.epoch);
         self.last_move_seq = Some(msg.seq);
 
-        let (vx, vy) = self.map_to_virtual_desktop(msg.x, msg.y);
+        let (px, py, vx, vy) = self.map_coordinates(msg.x, msg.y);
+        trace!(px, py, vx, vy, seq = msg.seq, "Injecting MouseMove");
+        unsafe {
+            let _ = SetCursorPos(px, py);
+        }
         send_mouse_input(
             vx,
             vy,
@@ -93,7 +191,10 @@ impl WinInputInjector {
                 } else {
                     self.held_buttons.remove(&button);
                 }
-                let (vx, vy) = self.map_to_virtual_desktop(x, y);
+                let (px, py, vx, vy) = self.map_coordinates(x, y);
+                unsafe {
+                    let _ = SetCursorPos(px, py);
+                }
                 let (flag, data) = button_to_win32(button, pressed);
                 send_mouse_input(
                     vx,
@@ -127,12 +228,10 @@ impl WinInputInjector {
         }
     }
 
-    /// Maps normalized monitor coordinates (0..65535) to Windows Virtual Desktop coordinates (0..65535).
-    fn map_to_virtual_desktop(&self, norm_x: u16, norm_y: u16) -> (i32, i32) {
-        let Some(ref disp) = self.active_display else {
-            return (norm_x as i32, norm_y as i32);
-        };
-
+    /// Maps normalized monitor coordinates (0..65535) to:
+    /// - `(px, py)`: physical Windows virtual-desktop pixel coordinates (for `SetCursorPos`)
+    /// - `(vx, vy)`: normalized 0..65535 Virtual Desktop coordinates (for `SendInput`)
+    fn map_coordinates(&self, norm_x: u16, norm_y: u16) -> (i32, i32, i32, i32) {
         let (v_left, v_top, v_w, v_h) = unsafe {
             (
                 GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -142,17 +241,29 @@ impl WinInputInjector {
             )
         };
 
-        let px = disp.left as f64 + (norm_x as f64 / 65535.0) * (disp.width.saturating_sub(1) as f64);
-        let py = disp.top as f64 + (norm_y as f64 / 65535.0) * (disp.height.saturating_sub(1) as f64);
+        let (px_f, py_f) = if let Some(ref disp) = self.active_display {
+            (
+                disp.left as f64 + (norm_x as f64 / 65535.0) * (disp.width.saturating_sub(1) as f64),
+                disp.top as f64 + (norm_y as f64 / 65535.0) * (disp.height.saturating_sub(1) as f64),
+            )
+        } else {
+            (
+                v_left as f64 + (norm_x as f64 / 65535.0) * (v_w.saturating_sub(1) as f64),
+                v_top as f64 + (norm_y as f64 / 65535.0) * (v_h.saturating_sub(1) as f64),
+            )
+        };
 
-        let vx = (((px - v_left as f64) * 65535.0) / (v_w.saturating_sub(1).max(1) as f64))
+        let px = px_f.round() as i32;
+        let py = py_f.round() as i32;
+
+        let vx = (((px_f - v_left as f64) * 65535.0) / (v_w.saturating_sub(1).max(1) as f64))
             .round()
             .clamp(0.0, 65535.0) as i32;
-        let vy = (((py - v_top as f64) * 65535.0) / (v_h.saturating_sub(1).max(1) as f64))
+        let vy = (((py_f - v_top as f64) * 65535.0) / (v_h.saturating_sub(1).max(1) as f64))
             .round()
             .clamp(0.0, 65535.0) as i32;
 
-        (vx, vy)
+        (px, py, vx, vy)
     }
 }
 

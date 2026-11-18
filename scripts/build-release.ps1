@@ -1,43 +1,39 @@
 <#
 .SYNOPSIS
-  Compila el Agente Cliente (stub único sin dependencias) y la Aplicación Admin (Tauri v2).
+  Compila Gecko 100% nativo en Rust (cero web):
+    1. Agente Cliente (rmm-agent.exe -> agent_stub.exe, ~2 MB, CRT estático)
+    2. Aplicación Admin Nativa (gecko-admin.exe, GPU egui + Media Foundation Decoder + QUIC)
+    3. Carpeta portable lista para usar en dist-gecko\
 #>
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 
-Write-Host "==> 1/3 Compilando plantilla ligera rmm-agent (Zero-Copy + CRT estático)..." -ForegroundColor Cyan
 Push-Location $Root
 try {
+    Write-Host "==> 1/3 Compilando plantilla ligera rmm-agent (Zero-Copy + CRT estático)..." -ForegroundColor Cyan
     $env:RUSTFLAGS = "-C target-feature=+crt-static"
-    cargo build -p rmm-agent --profile release-agent
+    cargo build --offline -p rmm-agent --profile release-agent
     Remove-Item Env:\RUSTFLAGS -ErrorAction SilentlyContinue
 
     $StubSrc = Join-Path $Root "target\release-agent\rmm-agent.exe"
-    $ResDir = Join-Path $Root "apps\admin\src-tauri\resources"
-    New-Item -ItemType Directory -Force -Path $ResDir | Out-Null
-    Copy-Item -Force $StubSrc (Join-Path $ResDir "agent_stub.exe")
+    $AdminResDir = Join-Path $Root "apps\admin\resources"
+    New-Item -ItemType Directory -Force -Path $AdminResDir | Out-Null
+    Copy-Item -Force $StubSrc (Join-Path $AdminResDir "agent_stub.exe")
 
-    $SizeMb = [Math]::Round((Get-Item $StubSrc).Length / 1MB, 2)
-    Write-Host "    Stub generado: $StubSrc ($SizeMb MB)" -ForegroundColor Green
+    $StubMb = [Math]::Round((Get-Item $StubSrc).Length / 1MB, 2)
+    Write-Host "    Stub listo: $StubSrc ($StubMb MB)" -ForegroundColor Green
 
-    Write-Host "==> 2/3 Compilando frontend Admin (React + Tailwind + WebCodecs)..." -ForegroundColor Cyan
-    Push-Location (Join-Path $Root "apps\admin")
-    try {
-        npm.cmd install
-        npm.cmd run build
-    } finally {
-        Pop-Location
-    }
+    Write-Host "==> 2/3 Compilando aplicación de escritorio nativa Gecko Admin (gecko-admin.exe)..." -ForegroundColor Cyan
+    cargo build --offline -p gecko-admin --release
 
-    Write-Host "==> 3/3 Compilando aplicación de escritorio Admin (Tauri v2)..." -ForegroundColor Cyan
-    Push-Location (Join-Path $Root "apps\admin")
-    try {
-        npx.cmd tauri build
-    } finally {
-        Pop-Location
-    }
+    Write-Host "==> 3/3 Empaquetando carpeta portable en dist-gecko\..." -ForegroundColor Cyan
+    $DistDir = Join-Path $Root "dist-gecko"
+    New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "resources") | Out-Null
+    Copy-Item -Force (Join-Path $Root "target\release\gecko-admin.exe") (Join-Path $DistDir "Gecko.exe")
+    Copy-Item -Force $StubSrc (Join-Path $DistDir "resources\agent_stub.exe")
 
-    Write-Host "==> Compilación completada." -ForegroundColor Green
+    $AdminMb = [Math]::Round((Get-Item (Join-Path $DistDir "Gecko.exe")).Length / 1MB, 2)
+    Write-Host "    Gecko.exe listo ($AdminMb MB) en: $DistDir" -ForegroundColor Green
 } finally {
     Pop-Location
 }

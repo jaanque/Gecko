@@ -1,36 +1,32 @@
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rmm_proto::{inject_config_into_stub, AgentConfigData, SignedAgentConfig};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::state::{AdminState, IssuedTokenRecord};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct StubStatus {
     pub found: bool,
     pub path: Option<String>,
     pub size_bytes: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct GenerateClientRequest {
     pub label: String,
     pub admin_name: String,
     pub endpoints: Vec<String>,
-    /// Expiration in hours. `0` or `None` means no expiration.
     pub ttl_hours: Option<u64>,
     pub file_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct GenerateClientResponse {
     pub token_id: String,
     pub output_path: String,
@@ -39,31 +35,28 @@ pub struct GenerateClientResponse {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Locate the precompiled `rmm-agent.exe` / `agent_stub.exe` template binary.
-/// Searches bundled resource paths first, then workspace Cargo target folders (for dev).
-pub fn locate_agent_stub(app_resource_dir: Option<&Path>) -> Option<PathBuf> {
+/// Locate the precompiled `agent_stub.exe` / `rmm-agent.exe` template binary.
+pub fn locate_agent_stub() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-
-    if let Some(res) = app_resource_dir {
-        candidates.push(res.join("agent_stub.exe"));
-        candidates.push(res.join("resources").join("agent_stub.exe"));
-    }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("agent_stub.exe"));
             candidates.push(dir.join("rmm-agent.exe"));
             candidates.push(dir.join("resources").join("agent_stub.exe"));
-            // Walk up to workspace root in cargo dev/release layouts
             for ancestor in dir.ancestors().take(5) {
-                candidates.push(ancestor.join("target").join("release-agent").join("rmm-agent.exe"));
+                candidates.push(
+                    ancestor
+                        .join("target")
+                        .join("release-agent")
+                        .join("rmm-agent.exe"),
+                );
                 candidates.push(ancestor.join("target").join("release").join("rmm-agent.exe"));
                 candidates.push(ancestor.join("target").join("debug").join("rmm-agent.exe"));
                 candidates.push(
                     ancestor
                         .join("apps")
                         .join("admin")
-                        .join("src-tauri")
                         .join("resources")
                         .join("agent_stub.exe"),
                 );
@@ -73,17 +66,29 @@ pub fn locate_agent_stub(app_resource_dir: Option<&Path>) -> Option<PathBuf> {
 
     if let Ok(cwd) = std::env::current_dir() {
         for ancestor in cwd.ancestors().take(4) {
-            candidates.push(ancestor.join("target").join("release-agent").join("rmm-agent.exe"));
+            candidates.push(
+                ancestor
+                    .join("target")
+                    .join("release-agent")
+                    .join("rmm-agent.exe"),
+            );
             candidates.push(ancestor.join("target").join("release").join("rmm-agent.exe"));
             candidates.push(ancestor.join("target").join("debug").join("rmm-agent.exe"));
+            candidates.push(
+                ancestor
+                    .join("apps")
+                    .join("admin")
+                    .join("resources")
+                    .join("agent_stub.exe"),
+            );
         }
     }
 
     candidates.into_iter().find(|p| p.is_file())
 }
 
-pub fn get_stub_status(app_resource_dir: Option<&Path>) -> StubStatus {
-    match locate_agent_stub(app_resource_dir) {
+pub fn get_stub_status() -> StubStatus {
+    match locate_agent_stub() {
         Some(path) => {
             let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             StubStatus {
@@ -100,7 +105,7 @@ pub fn get_stub_status(app_resource_dir: Option<&Path>) -> StubStatus {
     }
 }
 
-/// Detect the primary LAN IPv4 address of this Admin machine (zero external network traffic).
+/// Detect the primary LAN IPv4 address of this Admin machine without sending any network traffic.
 pub fn detect_local_ipv4() -> Vec<String> {
     let mut ips = Vec::new();
     if let Ok(sock) = UdpSocket::bind("0.0.0.0:0") {
@@ -116,21 +121,18 @@ pub fn detect_local_ipv4() -> Vec<String> {
     ips
 }
 
-/// Generate a customized, zero-config single-file executable by injecting a cryptographically
-/// signed configuration overlay at the tail of the precompiled agent stub.
 pub fn generate_configured_client(
     state: &AdminState,
-    app_resource_dir: Option<&Path>,
     req: GenerateClientRequest,
 ) -> Result<GenerateClientResponse> {
-    let stub_path = locate_agent_stub(app_resource_dir).ok_or_else(|| {
+    let stub_path = locate_agent_stub().ok_or_else(|| {
         anyhow!(
-            "No se encontro la plantilla precompilada (rmm-agent.exe). Compila primero el agente con `cargo build -p rmm-agent --profile release-agent`."
+            "Plantilla precompilada (rmm-agent.exe) no encontrada. Compilala con `cargo build -p rmm-agent --profile release-agent`."
         )
     })?;
 
     let stub_bytes = fs::read(&stub_path)
-        .with_context(|| format!("Failed to read stub binary at {}", stub_path.display()))?;
+        .with_context(|| format!("No se pudo leer el stub en {}", stub_path.display()))?;
 
     let endpoints: Vec<String> = req
         .endpoints
@@ -139,7 +141,7 @@ pub fn generate_configured_client(
         .filter(|s| !s.is_empty())
         .collect();
     if endpoints.is_empty() {
-        return Err(anyhow!("Debes indicar al menos un endpoint (IP:puerto o dominio:puerto)"));
+        return Err(anyhow!("Debes indicar al menos un endpoint (IP:puerto)"));
     }
 
     let token_uuid = Uuid::new_v4();
@@ -212,6 +214,15 @@ pub fn generate_configured_client(
         endpoints,
         expires_at,
     })
+}
+
+pub fn reveal_in_explorer(path: &str) {
+    let p = Path::new(path);
+    if p.is_file() {
+        let _ = Command::new("explorer.exe").args(["/select,", path]).spawn();
+    } else {
+        let _ = Command::new("explorer.exe").arg(path).spawn();
+    }
 }
 
 fn sanitize_filename(raw: &str) -> String {

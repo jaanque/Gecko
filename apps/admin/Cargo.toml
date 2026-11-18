@@ -1,25 +1,20 @@
 [package]
-name = "rmm-admin"
+name = "gecko-admin"
 version.workspace = true
 edition.workspace = true
 
-[lib]
-name = "rmm_admin_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [[bin]]
-name = "rmm-admin"
+name = "gecko-admin"
 path = "src/main.rs"
 
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
 [dependencies]
-rmm-proto = { path = "../../../crates/rmm-proto" }
-rmm-net = { path = "../../../crates/rmm-net" }
-tauri = { version = "2", features = [] }
+rmm-proto = { path = "../../crates/rmm-proto" }
+rmm-net = { path = "../../crates/rmm-net" }
+rmm-decode-win = { path = "../../crates/rmm-decode-win" }
+rmm-input-win = { path = "../../crates/rmm-input-win" }
+eframe.workspace = true
 serde.workspace = true
-serde_json = "1.0"
+serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -27,8 +22,8 @@ tokio.workspace = true
 quinn.workspace = true
 postcard.workspace = true
 parking_lot.workspace = true
+crossbeam-channel.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 directories.workspace = true
 hex.workspace = true
-base64 = "0.22"

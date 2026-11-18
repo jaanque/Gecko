@@ -24,6 +24,8 @@ pub enum VideoCodec {
 pub enum AgentControlMsg {
     Hello {
         protocol_version: u16,
+        /// Stable deterministic hardware/machine fingerprint so Admin recognizes returning PCs.
+        machine_id: [u8; 16],
         agent_id: [u8; 16],
         token_id: [u8; 16],
         label: String,
