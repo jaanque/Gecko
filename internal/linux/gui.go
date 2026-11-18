@@ -8,9 +8,12 @@ import (
 	"image"
 	"io"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"remote-control/internal/clientui"
+	"remote-control/internal/i18n"
 )
 
 const (
@@ -27,22 +30,26 @@ const (
 	xEvClientMessage = 33
 )
 
-// ClientWindow manages the native pure-Go X11 client window (Catalan UI).
+// ClientWindow manages the native pure-Go X11 client window (with pure-Wayland dialog fallback).
 type ClientWindow struct {
 	hostname  string
 	logoPNG   []byte
+	lang      i18n.Lang
+	strings   i18n.ClientStrings
 	callbacks clientui.Callbacks
 
-	mu        sync.Mutex
-	state     clientui.State
-	detail    string
-	xc        *x11Conn
-	win       uint32
-	gc        uint32
-	atomWake  uint32
-	readyCh   chan struct{}
-	readyOnce sync.Once
-	closed    bool
+	mu           sync.Mutex
+	state        clientui.State
+	detail       string
+	xc           *x11Conn
+	win          uint32
+	gc           uint32
+	atomWake     uint32
+	headlessCh   chan clientui.State
+	headlessMode bool
+	readyCh      chan struct{}
+	readyOnce    sync.Once
+	closed       bool
 
 	canvas  *clientCanvas
 	hover   uiButtonID
@@ -50,20 +57,24 @@ type ClientWindow struct {
 	topmost bool
 }
 
-// NewClientWindow constructs a Linux X11 ClientWindow instance.
-func NewClientWindow(hostname string, logoPNG []byte, cb clientui.Callbacks) *ClientWindow {
+// NewClientWindow constructs a Linux ClientWindow instance.
+func NewClientWindow(hostname string, logoPNG []byte, lang i18n.Lang, cb clientui.Callbacks) *ClientWindow {
+	str := i18n.Client(lang)
 	return &ClientWindow{
-		hostname:  hostname,
-		logoPNG:   logoPNG,
-		callbacks: cb,
-		state:     clientui.StateConnecting,
-		detail:    "Connectant...",
-		readyCh:   make(chan struct{}),
-		canvas:    newClientCanvas(logoPNG),
+		hostname:   hostname,
+		logoPNG:    logoPNG,
+		lang:       lang,
+		strings:    str,
+		callbacks:  cb,
+		state:      clientui.StateConnecting,
+		detail:     str.Connecting,
+		headlessCh: make(chan clientui.State, 8),
+		readyCh:    make(chan struct{}),
+		canvas:     newClientCanvas(logoPNG, lang),
 	}
 }
 
-// Ready returns a channel closed once the X11 window has been created.
+// Ready returns a channel closed once the client window/session UI is ready.
 func (w *ClientWindow) Ready() <-chan struct{} {
 	return w.readyCh
 }
@@ -77,18 +88,29 @@ func (w *ClientWindow) SetState(st clientui.State, detail string) {
 	win := w.win
 	atomWake := w.atomWake
 	closed := w.closed
+	headless := w.headlessMode
 	w.mu.Unlock()
 
+	if headless {
+		select {
+		case w.headlessCh <- st:
+		default:
+		}
+		return
+	}
 	if !closed && xc != nil && win != 0 && atomWake != 0 {
 		_ = xc.SendClientMessage(win, win, atomWake, 0, 0, 0, 0, 0, 0)
 	}
 }
 
-// Run creates the native X11 window and processes events until closed.
+// Run creates the native X11 window (or pure-Wayland zenity/kdialog fallback) until closed.
 func (w *ClientWindow) Run() error {
 	xc, err := dialX11()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Client Remot: %v\n", err)
+		if IsWaylandSession() {
+			return w.runWaylandFallback()
+		}
+		fmt.Fprintf(os.Stderr, "%s: %v\n", w.strings.WindowTitle, err)
 		w.readyOnce.Do(func() { close(w.readyCh) })
 		return err
 	}
@@ -126,7 +148,7 @@ func (w *ClientWindow) Run() error {
 	}
 
 	// Title: WM_NAME (atom 39, type STRING = 31) and _NET_WM_NAME (UTF8_STRING).
-	titleBytes := []byte("Client Remot")
+	titleBytes := []byte(w.strings.WindowTitle)
 	_ = xc.ChangeProperty(win, 39, 31, 8, titleBytes)
 	if atomNetWMName != 0 && atomUTF8String != 0 {
 		_ = xc.ChangeProperty(win, atomNetWMName, atomUTF8String, 8, titleBytes)
@@ -264,6 +286,46 @@ func (w *ClientWindow) Run() error {
 		w.callbacks.OnClose()
 	}
 	return nil
+}
+
+func (w *ClientWindow) runWaylandFallback() error {
+	w.mu.Lock()
+	w.headlessMode = true
+	w.mu.Unlock()
+	w.readyOnce.Do(func() { close(w.readyCh) })
+
+	fmt.Printf("[%s] %s (Wayland)\n", w.strings.WindowTitle, w.hostname)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	for {
+		select {
+		case <-sigCh:
+			if w.callbacks.OnClose != nil {
+				w.callbacks.OnClose()
+			}
+			return nil
+		case st := <-w.headlessCh:
+			if st == clientui.StatePrompt {
+				go func() {
+					allowed, handled := showWaylandConsentDialog(
+						w.strings.WindowTitle+" — "+w.hostname,
+						w.strings.PromptMessage,
+						w.strings.Allow,
+						w.strings.Deny,
+					)
+					if handled && allowed {
+						if w.callbacks.OnAllow != nil {
+							w.callbacks.OnAllow()
+						}
+					} else if w.callbacks.OnDeny != nil {
+						w.callbacks.OnDeny()
+					}
+				}()
+			}
+		}
+	}
 }
 
 func (w *ClientWindow) currentState() clientui.State {

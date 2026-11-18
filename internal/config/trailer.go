@@ -19,7 +19,7 @@ const (
 
 var ErrNoEmbeddedConfig = errors.New("no embedded client config found")
 
-// ClientConfig holds the connection, mTLS credentials, and optional logo embedded into ClientRemot.
+// ClientConfig holds the connection, mTLS credentials, UI language, and optional logo embedded into ClientRemot.
 type ClientConfig struct {
 	ServerAddr    string `json:"server_addr"`
 	CertSHA256    string `json:"cert_sha256"`
@@ -27,6 +27,7 @@ type ClientConfig struct {
 	ClientCertDER []byte `json:"client_cert_der"`
 	ClientKeyDER  []byte `json:"client_key_der"`
 	LogoPNG       []byte `json:"logo_png,omitempty"`
+	Lang          string `json:"lang,omitempty"` // "ca", "es", "en"
 }
 
 // Validate checks that all required fields and mTLS credentials are present.

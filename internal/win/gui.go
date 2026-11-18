@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"remote-control/internal/clientui"
+	"remote-control/internal/i18n"
 )
 
 var (
@@ -164,10 +165,11 @@ type flashWInfo struct {
 	DwTimeout uint32
 }
 
-// ClientWindow manages the native Win32 client dialog (Catalan UI).
+// ClientWindow manages the native Win32 client dialog (localized ca/es/en UI).
 type ClientWindow struct {
 	hostname  string
 	logoPNG   []byte
+	strings   i18n.ClientStrings
 	callbacks clientui.Callbacks
 
 	mu        sync.Mutex
@@ -194,13 +196,15 @@ var (
 )
 
 // NewClientWindow constructs a ClientWindow instance. Call Run() to start the Win32 message loop.
-func NewClientWindow(hostname string, logoPNG []byte, cb clientui.Callbacks) *ClientWindow {
+func NewClientWindow(hostname string, logoPNG []byte, lang i18n.Lang, cb clientui.Callbacks) *ClientWindow {
+	str := i18n.Client(lang)
 	return &ClientWindow{
 		hostname:  hostname,
 		logoPNG:   logoPNG,
+		strings:   str,
 		callbacks: cb,
 		state:     clientui.StateConnecting,
-		detail:    "Connectant...",
+		detail:    str.Connecting,
 		dpi:       96,
 		readyCh:   make(chan struct{}),
 	}
@@ -247,7 +251,7 @@ func (w *ClientWindow) Run() error {
 	defer procDeleteObject.Call(w.bgBrush)
 
 	className, _ := syscall.UTF16PtrFromString("RemoteClientWindowClass")
-	title, _ := syscall.UTF16PtrFromString("Client Remot")
+	title, _ := syscall.UTF16PtrFromString(w.strings.WindowTitle)
 
 	wc := wndClassExW{
 		CbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
@@ -309,9 +313,9 @@ func (w *ClientWindow) Run() error {
 	procSetWindowPos.Call(hwnd, 0, uintptr(posX), uintptr(posY), uintptr(winW), uintptr(winH), 0)
 
 	btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
-	allowTxt, _ := syscall.UTF16PtrFromString("Permetre")
-	denyTxt, _ := syscall.UTF16PtrFromString("Denegar")
-	discTxt, _ := syscall.UTF16PtrFromString("Desconnectar")
+	allowTxt, _ := syscall.UTF16PtrFromString(w.strings.Allow)
+	denyTxt, _ := syscall.UTF16PtrFromString(w.strings.Deny)
+	discTxt, _ := syscall.UTF16PtrFromString(w.strings.Disconnect)
 
 	btnStyle := uintptr(wsChild | bsOwnerDraw)
 	btnY := w.scale(150)
@@ -476,20 +480,20 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 	case clientui.StatePrompt:
 		procSetTextColor.Call(hdc, rgb(24, 24, 27))
 		rcMsg := rect{pad, w.scale(108), cr.Right - pad, w.scale(136)}
-		drawText(hdc, "L'administrador sol·licita controlar aquest equip.", &rcMsg, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+		drawText(hdc, w.strings.PromptMessage, &rcMsg, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 	case clientui.StateActive:
 		drawStatusDot(hdc, pad, w.scale(158), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(21, 128, 61))
 		rcTxt := rect{pad + w.scale(18), w.scale(148), cr.Right - w.scale(164), w.scale(178)}
-		drawText(hdc, "Sessió activa", &rcTxt, dtLeft|dtSingleLn|dtVCenter)
+		drawText(hdc, w.strings.ActiveSession, &rcTxt, dtLeft|dtSingleLn|dtVCenter)
 
 	case clientui.StateOnline:
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(63, 63, 70))
 		txt := detail
 		if txt == "" {
-			txt = "En línia"
+			txt = w.strings.Online
 		}
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, txt, &rcTxt, dtLeft|dtSingleLn|dtVCenter)
@@ -505,7 +509,7 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 		procSetTextColor.Call(hdc, rgb(82, 82, 91))
 		txt := detail
 		if txt == "" {
-			txt = "Connectant..."
+			txt = w.strings.Connecting
 		}
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, txt, &rcTxt, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
@@ -524,7 +528,7 @@ func (w *ClientWindow) drawButton(dis *drawItemStruct) {
 
 	switch dis.CtlID {
 	case idBtnAllow:
-		label = "Permetre"
+		label = w.strings.Allow
 		if pressed {
 			bgColor = rgb(20, 83, 45)
 			borderColor = rgb(20, 83, 45)
@@ -535,7 +539,7 @@ func (w *ClientWindow) drawButton(dis *drawItemStruct) {
 		textColor = rgb(255, 255, 255)
 
 	case idBtnDeny:
-		label = "Denegar"
+		label = w.strings.Deny
 		if pressed {
 			bgColor = rgb(254, 242, 242)
 		} else {
@@ -545,7 +549,7 @@ func (w *ClientWindow) drawButton(dis *drawItemStruct) {
 		textColor = rgb(185, 28, 28)
 
 	case idBtnDisconnect:
-		label = "Desconnectar"
+		label = w.strings.Disconnect
 		if pressed {
 			bgColor = rgb(244, 244, 245)
 		} else {

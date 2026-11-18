@@ -5,6 +5,7 @@ package win
 import (
 	"errors"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"remote-control/internal/video"
@@ -84,8 +85,13 @@ type iconInfo struct {
 }
 
 // ScreenCapturer captures a specific Windows monitor or the full virtual desktop
-// using parallel 64x64 hybrid lossless-UI + JPEG tile encoding.
+// using hardware-accelerated DXGI Desktop Duplication (with automatic GDI BitBlt fallback)
+// and parallel 64x64 hybrid lossless-UI + JPEG tile encoding.
 type ScreenCapturer struct {
+	dxgi         dxgiCapturer
+	dxgiRetryAt  time.Time
+	usingDXGI    bool
+
 	hdcMem   uintptr
 	hBitmap  uintptr
 	oldObj   uintptr
@@ -104,8 +110,10 @@ func NewScreenCapturer() *ScreenCapturer {
 	}
 }
 
-// Close releases all GDI resources.
+// Close releases all DXGI and GDI resources.
 func (sc *ScreenCapturer) Close() {
+	sc.dxgi.Close()
+	sc.usingDXGI = false
 	sc.releaseGDI()
 	sc.currBGRA = nil
 	if sc.encoder != nil {
@@ -159,6 +167,8 @@ func (sc *ScreenCapturer) ensureSurface(hdcScreen uintptr, w, h int) error {
 
 // CaptureFrame captures the selected monitor (0 = Monitor 1, -1 = all monitors) and returns
 // an encoded MsgFrame payload containing only changed 64x64 tiles. Returns nil payload if unchanged.
+// Single-monitor captures use GPU DXGI Desktop Duplication with dirty-rect fast-path and fall back
+// transparently to GDI BitBlt on virtual multi-monitor views or unsupported sessions (e.g. RDP/VM).
 func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int, forceFull bool) ([]byte, int, int, error) {
 	bounds := ResolveMonitorBounds(monitorIndex)
 	vx := bounds.X
@@ -172,6 +182,29 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int
 		sc.originX = vx
 		sc.originY = vy
 		sc.encoder.Reset()
+	}
+
+	// Prefer hardware DXGI Desktop Duplication for single-monitor capture.
+	if monitorIndex >= 0 && time.Now().After(sc.dxgiRetryAt) {
+		bgra, dirtyRects, changed, err := sc.dxgi.AcquireFrame(vx, vy, w, h, forceFull)
+		if err == nil {
+			if !sc.usingDXGI {
+				sc.usingDXGI = true
+				sc.releaseGDI()
+			}
+			if !changed {
+				return nil, w, h, nil
+			}
+			pkt := sc.encoder.EncodeDirtyRects(frameID, bgra, w, h, quality, dirtyRects, forceFull)
+			return pkt, w, h, nil
+		}
+		// Back off DXGI retries briefly and fall back transparently to GDI BitBlt.
+		sc.usingDXGI = false
+		sc.dxgi.Close()
+		sc.dxgiRetryAt = time.Now().Add(3 * time.Second)
+	} else if monitorIndex < 0 && sc.usingDXGI {
+		sc.usingDXGI = false
+		sc.dxgi.Close()
 	}
 
 	hdcScreen, _, _ := procGetDC.Call(0)

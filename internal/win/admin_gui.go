@@ -63,6 +63,7 @@ type AdminClientRow struct {
 	Hostname     string
 	OS           string
 	Username     string
+	Version      string
 	IP           string
 	Width        int
 	Height       int
@@ -935,7 +936,7 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		nameRC := rect{textLeft, ry + a.scale(10), textRight, ry + a.scale(32)}
 		drawText(memDC, titleLine, &nameRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-		metaParts := make([]string, 0, 4)
+		metaParts := make([]string, 0, 5)
 		if c.Username != "" {
 			metaParts = append(metaParts, c.Username)
 		}
@@ -947,6 +948,9 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		}
 		if c.MonitorCount > 1 {
 			metaParts = append(metaParts, fmt.Sprintf("%d monitores", c.MonitorCount))
+		}
+		if c.Version != "" {
+			metaParts = append(metaParts, "v"+strings.TrimPrefix(c.Version, "v"))
 		}
 		meta := strings.Join(metaParts, " · ")
 		procSelectObject.Call(memDC, a.fontMono)

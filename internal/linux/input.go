@@ -29,6 +29,7 @@ type InputInjector struct {
 	xc           *x11Conn
 	xtestMajor   byte
 	xtestOK      bool
+	wl           waylandBackend
 	symToCode    map[uint32]byte
 	heldCodes    map[byte]bool
 	lastMonIdx   int
@@ -161,7 +162,12 @@ func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent, monitorIndex int) 
 	inj.mu.Lock()
 	defer inj.mu.Unlock()
 
+	if IsWaylandSession() && inj.wl.injectMouse(ev, max(1920, inj.cachedBounds.Width), max(1080, inj.cachedBounds.Height)) {
+		return
+	}
+
 	if !inj.ensureConnLocked() {
+		_ = inj.wl.injectMouse(ev, 1920, 1080)
 		return
 	}
 
@@ -253,7 +259,12 @@ func (inj *InputInjector) HandleKey(ev protocol.KeyEvent) {
 	inj.mu.Lock()
 	defer inj.mu.Unlock()
 
+	if IsWaylandSession() && inj.wl.injectKey(ev) {
+		return
+	}
+
 	if !inj.ensureConnLocked() {
+		_ = inj.wl.injectKey(ev)
 		return
 	}
 

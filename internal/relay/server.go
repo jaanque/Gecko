@@ -53,6 +53,7 @@ type clientPeer struct {
 	hostname     string
 	os           string
 	username     string
+	version      string
 	ip           string
 	width        int
 	height       int
@@ -326,6 +327,7 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 	}
 	osName := sanitizeOS(auth.OS)
 	username := sanitizeText(auth.Username, maxUsernameRunes)
+	clientVer := sanitizeText(auth.Version, 32)
 
 	monCount := len(auth.Monitors)
 	if monCount < 1 {
@@ -349,6 +351,7 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 		hostname:     hostname,
 		os:           osName,
 		username:     username,
+		version:      clientVer,
 		ip:           ip,
 		width:        width,
 		height:       height,
@@ -926,6 +929,7 @@ func (s *Server) snapshotClientsLocked() []protocol.ClientSummary {
 			Hostname:     c.hostname,
 			OS:           c.os,
 			Username:     c.username,
+			Version:      c.version,
 			IP:           c.ip,
 			Width:        c.width,
 			Height:       c.height,

@@ -3,29 +3,38 @@ package linux
 import (
 	"os"
 	"strings"
+
+	"remote-control/internal/i18n"
 )
 
-// DetectSessionWarning returns a Catalan user-facing warning if the current Linux desktop
-// session is running under Wayland (where X11 GetImage/XTEST capture & control are restricted).
-// Returns "" on standard X11 sessions.
-func DetectSessionWarning() string {
+// IsWaylandSession reports whether the process is running inside a Wayland desktop session.
+func IsWaylandSession() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("XDG_SESSION_TYPE")), "wayland") ||
+		strings.TrimSpace(os.Getenv("WAYLAND_DISPLAY")) != ""
+}
+
+// DetectSessionWarning returns a localized informational warning when running under Wayland
+// or when no graphical display is available. Returns "" on native X11 sessions.
+func DetectSessionWarning(lang i18n.Lang) string {
 	return detectSessionWarningFromEnv(
 		os.Getenv("XDG_SESSION_TYPE"),
 		os.Getenv("WAYLAND_DISPLAY"),
 		os.Getenv("DISPLAY"),
+		lang,
 	)
 }
 
-func detectSessionWarningFromEnv(sessionType, waylandDisp, x11Disp string) string {
+func detectSessionWarningFromEnv(sessionType, waylandDisp, x11Disp string, lang i18n.Lang) string {
+	str := i18n.Client(lang)
 	isWayland := strings.EqualFold(strings.TrimSpace(sessionType), "wayland") || strings.TrimSpace(waylandDisp) != ""
 	if isWayland {
 		if strings.TrimSpace(x11Disp) == "" {
-			return "Sessió Wayland sense X11: inicia sessió en Xorg (X11)"
+			return str.WaylandNoX11Warning
 		}
-		return "Wayland detectat (XWayland): canvia a X11 per captura completa"
+		return str.WaylandXWaylandWarn
 	}
 	if strings.TrimSpace(x11Disp) == "" {
-		return "No s'ha trobat cap sessió gràfica X11 (DISPLAY buit)"
+		return str.NoX11DisplayWarning
 	}
 	return ""
 }

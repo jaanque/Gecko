@@ -7,7 +7,6 @@
 [![CI](https://github.com/jaanque/Gecko/actions/workflows/ci.yml/badge.svg)](https://github.com/jaanque/Gecko/actions/workflows/ci.yml)
 [![Llicència: MIT](https://img.shields.io/badge/llicència-MIT-18181B)](LICENSE)
 ![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)
-![Zero dependències](https://img.shields.io/badge/dependències-0-16A34A)
 ![Windows & Linux](https://img.shields.io/badge/plataformes-Windows%20%7C%20Linux-2563EB)
 
 *Connecta i assisteix equips Windows i Linux des de qualsevol xarxa, sense instal·lacions al client, sense serveis de tercers i amb control total sobre la teva infraestructura.*
@@ -22,7 +21,7 @@
 
 - **Sense instal·lació per a l'usuari**: un únic executable portable personalitzable amb el teu logotip. L'usuari només l'obre i tria **Permetre** o **Denegar**.
 - **Privacitat i seguretat reals**: totes les connexions són xifrades extrem a extrem amb certificats mutus, cada client es pot revocar individualment i ningú no entra sense el consentiment explícit de l'usuari.
-- **Ràpid i lleuger**: escrit íntegrament en Go pur sense dependències externes. Imatge nítida per a text, fluida per a moviment i amb suport multimonitor.
+- **Ràpid i lleuger**: escrit íntegrament en Go pur. Imatge nítida per a text, fluida per a moviment i amb suport multimonitor.
 - **Fet per al suport del dia a dia**: sincronització de portapapers, enviament segur de fitxers, cerca d'equips i accions ràpides de sistema integrades.
 - **100% autoallotjat i Open Source**: desplega el teu propi servidor pont en segons i no depenguis de cap plataforma externa ni subscripció.
 

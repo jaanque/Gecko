@@ -12,11 +12,13 @@ import (
 )
 
 // ScreenCapturer captures a specific X11 monitor or the full virtual desktop
-// using pure-Go X11 GetImage + XFixes cursor overlay + shared hybrid tile encoding.
+// using pure-Go X11 GetImage + XFixes cursor overlay (or Wayland grim/portal fallback)
+// plus shared hybrid tile encoding.
 type ScreenCapturer struct {
 	xc          *x11Conn
 	xfixesOK    bool
 	xfixesMajor byte
+	wl          waylandBackend
 
 	originX  int
 	originY  int
@@ -82,7 +84,30 @@ func (sc *ScreenCapturer) ensureConn() error {
 // CaptureFrame captures the selected monitor (0 = Monitor 1, -1 = all monitors) and returns
 // an encoded MsgFrame payload containing only changed 64x64 tiles. Returns nil payload if unchanged.
 func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int, forceFull bool) ([]byte, int, int, error) {
+	// On Wayland sessions, prefer native Wayland capture tools (grim/spectacle/gnome-screenshot)
+	// because XWayland GetImage returns blank surfaces for native Wayland windows.
+	if IsWaylandSession() && sc.wl.canCapture() {
+		bgra, w, h, err := sc.wl.captureBGRA(sc.currBGRA)
+		if err == nil && w > 0 && h > 0 {
+			sc.currBGRA = bgra
+			sc.width = w
+			sc.height = h
+			pkt := sc.encoder.Encode(frameID, sc.currBGRA, w, h, quality, forceFull)
+			return pkt, w, h, nil
+		}
+	}
+
 	if err := sc.ensureConn(); err != nil {
+		if sc.wl.canCapture() {
+			bgra, w, h, werr := sc.wl.captureBGRA(sc.currBGRA)
+			if werr == nil && w > 0 && h > 0 {
+				sc.currBGRA = bgra
+				sc.width = w
+				sc.height = h
+				pkt := sc.encoder.Encode(frameID, sc.currBGRA, w, h, quality, forceFull)
+				return pkt, w, h, nil
+			}
+		}
 		return nil, 0, 0, err
 	}
 

@@ -174,6 +174,14 @@ func (e *TileEncoder) Close() {
 // Encode compares currBGRA (top-down 32-bit BGRA, stride = w*4) against the previous frame
 // and returns a serialized MsgFrame payload containing only changed tiles (or nil if unchanged).
 func (e *TileEncoder) Encode(frameID uint32, currBGRA []byte, w, h, quality int, forceFull bool) []byte {
+	return e.EncodeDirtyRects(frameID, currBGRA, w, h, quality, nil, forceFull)
+}
+
+// EncodeDirtyRects encodes changed 64x64 tiles into a serialized MsgFrame payload.
+// When dirtyRects is non-empty (e.g. from Windows DXGI Desktop Duplication GPU metadata)
+// and !forceFull, only tiles intersecting dirtyRects are inspected and updated, avoiding a
+// full-framebuffer scan on high-resolution (4K/HiDPI) monitors.
+func (e *TileEncoder) EncodeDirtyRects(frameID uint32, currBGRA []byte, w, h, quality int, dirtyRects []image.Rectangle, forceFull bool) []byte {
 	if w <= 0 || h <= 0 || len(currBGRA) < w*h*4 {
 		return nil
 	}
@@ -196,23 +204,62 @@ func (e *TileEncoder) Encode(frameID uint32, currBGRA []byte, w, h, quality int,
 	stride := w * 4
 
 	e.jobs = e.jobs[:0]
-	for ty := 0; ty < h; ty += tileSize {
-		th := tileSize
-		if ty+th > h {
-			th = h - ty
-		}
-		for tx := 0; tx < w; tx += tileSize {
-			tw := tileSize
-			if tx+tw > w {
-				tw = w - tx
+	if !sendAll && len(dirtyRects) > 0 {
+		cols := (w + tileSize - 1) / tileSize
+		rows := (h + tileSize - 1) / tileSize
+		visited := make([]bool, cols*rows)
+		screenBounds := image.Rect(0, 0, w, h)
+		for _, r := range dirtyRects {
+			clamped := r.Intersect(screenBounds)
+			if clamped.Empty() {
+				continue
 			}
-			if sendAll || tileChanged(currBGRA, e.prevBGRA, stride, tx, ty, tw, th) {
-				e.jobs = append(e.jobs, tileJob{tx: tx, ty: ty, tw: tw, th: th})
+			c0 := clamped.Min.X / tileSize
+			c1 := (clamped.Max.X - 1) / tileSize
+			r0 := clamped.Min.Y / tileSize
+			r1 := (clamped.Max.Y - 1) / tileSize
+			for gy := r0; gy <= r1; gy++ {
+				ty := gy * tileSize
+				th := tileSize
+				if ty+th > h {
+					th = h - ty
+				}
+				for gx := c0; gx <= c1; gx++ {
+					idx := gy*cols + gx
+					if visited[idx] {
+						continue
+					}
+					visited[idx] = true
+					tx := gx * tileSize
+					tw := tileSize
+					if tx+tw > w {
+						tw = w - tx
+					}
+					if tileChanged(currBGRA, e.prevBGRA, stride, tx, ty, tw, th) {
+						copyTile(e.prevBGRA, currBGRA, stride, tx, ty, tw, th)
+						e.jobs = append(e.jobs, tileJob{tx: tx, ty: ty, tw: tw, th: th})
+					}
+				}
 			}
 		}
+	} else {
+		for ty := 0; ty < h; ty += tileSize {
+			th := tileSize
+			if ty+th > h {
+				th = h - ty
+			}
+			for tx := 0; tx < w; tx += tileSize {
+				tw := tileSize
+				if tx+tw > w {
+					tw = w - tx
+				}
+				if sendAll || tileChanged(currBGRA, e.prevBGRA, stride, tx, ty, tw, th) {
+					e.jobs = append(e.jobs, tileJob{tx: tx, ty: ty, tw: tw, th: th})
+				}
+			}
+		}
+		copy(e.prevBGRA, currBGRA[:byteLen])
 	}
-
-	copy(e.prevBGRA, currBGRA[:byteLen])
 	e.hasPrev = true
 
 	jobCount := len(e.jobs)
@@ -305,4 +352,12 @@ func tileChanged(curr, prev []byte, stride, tx, ty, tw, th int) bool {
 		}
 	}
 	return false
+}
+
+func copyTile(dst, src []byte, stride, tx, ty, tw, th int) {
+	rowBytes := tw * 4
+	for row := 0; row < th; row++ {
+		off := (ty+row)*stride + tx*4
+		copy(dst[off:off+rowBytes], src[off:off+rowBytes])
+	}
 }

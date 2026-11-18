@@ -104,6 +104,7 @@ type AuthPayload struct {
 	Hostname string        `json:"hostname"`
 	OS       string        `json:"os,omitempty"`
 	Username string        `json:"username,omitempty"`
+	Version  string        `json:"version,omitempty"`
 	Width    int           `json:"width"`
 	Height   int           `json:"height"`
 	Monitors []MonitorInfo `json:"monitors,omitempty"`
@@ -149,6 +150,7 @@ type ClientSummary struct {
 	Hostname     string `json:"hostname"`
 	OS           string `json:"os,omitempty"`
 	Username     string `json:"username,omitempty"`
+	Version      string `json:"version,omitempty"`
 	IP           string `json:"ip"`
 	Width        int    `json:"width"`
 	Height       int    `json:"height"`

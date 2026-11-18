@@ -220,6 +220,11 @@ func (c *RelayClient) GenerateClientBinary(template []byte, logoPNG []byte) ([]b
 // GenerateClientBinaryWithLabel works like GenerateClientBinary and attaches an optional label
 // to the provisioned per-client credential, returning the binary and issued credential ID.
 func (c *RelayClient) GenerateClientBinaryWithLabel(template []byte, logoPNG []byte, label string) ([]byte, string, error) {
+	return c.GenerateClientBinaryWithOptions(template, logoPNG, label, "")
+}
+
+// GenerateClientBinaryWithOptions builds a configured client binary with optional logo, label, and UI language ("ca"|"es"|"en").
+func (c *RelayClient) GenerateClientBinaryWithOptions(template []byte, logoPNG []byte, label, lang string) ([]byte, string, error) {
 	if len(template) == 0 {
 		return nil, "", errors.New("plantilla de cliente no disponible; compila el proyecto con: go run ./cmd/build")
 	}
@@ -252,6 +257,7 @@ func (c *RelayClient) GenerateClientBinaryWithLabel(template []byte, logoPNG []b
 		ClientCertDER: clientCert,
 		ClientKeyDER:  clientKey,
 		LogoPNG:       logoPNG,
+		Lang:          strings.TrimSpace(lang),
 	})
 	return built, credID, err
 }

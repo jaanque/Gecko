@@ -9,6 +9,7 @@ import (
 	"math"
 
 	"remote-control/internal/clientui"
+	"remote-control/internal/i18n"
 )
 
 type uiRect struct {
@@ -34,16 +35,18 @@ const (
 )
 
 type clientCanvas struct {
-	w, h int
-	bgra []byte // top-down 32-bit BGRA for direct X11 PutImage
-	logo *image.NRGBA
+	w, h    int
+	bgra    []byte // top-down 32-bit BGRA for direct X11 PutImage
+	logo    *image.NRGBA
+	strings i18n.ClientStrings
 }
 
-func newClientCanvas(logoPNG []byte) *clientCanvas {
+func newClientCanvas(logoPNG []byte, lang i18n.Lang) *clientCanvas {
 	c := &clientCanvas{
-		w:    clientWinW,
-		h:    clientWinH,
-		bgra: make([]byte, clientWinW*clientWinH*4),
+		w:       clientWinW,
+		h:       clientWinH,
+		bgra:    make([]byte, clientWinW*clientWinH*4),
+		strings: i18n.Client(lang),
 	}
 	if len(logoPNG) > 0 {
 		if img, _, err := image.Decode(bytes.NewReader(logoPNG)); err == nil {
@@ -116,29 +119,29 @@ func (c *clientCanvas) render(hostname string, state clientui.State, detail stri
 
 	switch state {
 	case clientui.StatePrompt:
-		c.drawTextEllipsis(pad, 110, c.w-pad*2, "L'administrador sol·licita controlar aquest equip.", 1, false, color.RGBA{24, 24, 27, 255})
+		c.drawTextEllipsis(pad, 110, c.w-pad*2, c.strings.PromptMessage, 1, false, color.RGBA{24, 24, 27, 255})
 
 		allowBg := color.RGBA{24, 24, 27, 255}
 		if hover == btnAllow {
 			allowBg = color.RGBA{44, 44, 48, 255}
 		}
-		c.drawButton(allowRC, 6, allowBg, allowBg, color.RGBA{255, 255, 255, 255}, "Permetre")
+		c.drawButton(allowRC, 6, allowBg, allowBg, color.RGBA{255, 255, 255, 255}, c.strings.Allow)
 
 		denyBg := color.RGBA{255, 255, 255, 255}
 		if hover == btnDeny {
 			denyBg = color.RGBA{244, 244, 245, 255}
 		}
-		c.drawButton(denyRC, 6, denyBg, color.RGBA{212, 212, 216, 255}, color.RGBA{24, 24, 27, 255}, "Denegar")
+		c.drawButton(denyRC, 6, denyBg, color.RGBA{212, 212, 216, 255}, color.RGBA{24, 24, 27, 255}, c.strings.Deny)
 
 	case clientui.StateActive:
 		c.drawCircle(pad+5, 164, 5, color.RGBA{22, 163, 74, 255})
-		c.drawTextEllipsis(pad+20, 156, discRC.x0-pad-28, "Sessió activa", 1, false, color.RGBA{24, 24, 27, 255})
+		c.drawTextEllipsis(pad+20, 156, discRC.x0-pad-28, c.strings.ActiveSession, 1, false, color.RGBA{24, 24, 27, 255})
 
 		discBg := color.RGBA{255, 255, 255, 255}
 		if hover == btnDisconnect {
 			discBg = color.RGBA{244, 244, 245, 255}
 		}
-		c.drawButton(discRC, 6, discBg, color.RGBA{212, 212, 216, 255}, color.RGBA{24, 24, 27, 255}, "Desconnectar")
+		c.drawButton(discRC, 6, discBg, color.RGBA{212, 212, 216, 255}, color.RGBA{24, 24, 27, 255}, c.strings.Disconnect)
 
 	default:
 		dotCol := color.RGBA{217, 119, 6, 255}
@@ -147,16 +150,16 @@ func (c *clientCanvas) render(hostname string, state clientui.State, detail stri
 		case clientui.StateOnline:
 			dotCol = color.RGBA{22, 163, 74, 255}
 			if statusTxt == "" {
-				statusTxt = "En línia"
+				statusTxt = c.strings.Online
 			}
 		case clientui.StateError:
 			dotCol = color.RGBA{220, 38, 38, 255}
 			if statusTxt == "" {
-				statusTxt = "Error"
+				statusTxt = c.strings.ErrorFallback
 			}
 		default:
 			if statusTxt == "" {
-				statusTxt = "Connectant..."
+				statusTxt = c.strings.Connecting
 			}
 		}
 		c.drawCircle(pad+5, 146, 5, dotCol)

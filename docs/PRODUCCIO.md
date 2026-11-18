@@ -17,7 +17,7 @@ Aquest document recull els detalls d'arquitectura, compilació, desplegament en 
 
 ## Compilació i verificació
 
-Requereix **Go 1.22+** (sense `cgo` ni dependències externes; funciona des de Windows, Linux o macOS):
+Requereix **Go 1.22+** (sense `cgo`; funciona des de Windows, Linux o macOS):
 
 ```sh
 # Compilar tots els binaris (amd64 per defecte) a dist/

@@ -4,10 +4,11 @@ import (
 	"testing"
 
 	"remote-control/internal/clientui"
+	"remote-control/internal/i18n"
 )
 
 func TestClientCanvasRenderAndHitTest(t *testing.T) {
-	c := newClientCanvas(nil)
+	c := newClientCanvas(nil, i18n.LangCA)
 
 	for _, st := range []clientui.State{
 		clientui.StateConnecting,
