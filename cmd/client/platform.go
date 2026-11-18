@@ -31,6 +31,7 @@ type screenCapturer interface {
 }
 
 type inputInjector interface {
+	SetEnabled(enabled bool)
 	HandleMouse(ev protocol.MouseEvent, monitorIndex int)
 	HandleKey(ev protocol.KeyEvent)
 	ReleaseAllKeys()

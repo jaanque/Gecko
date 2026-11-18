@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"flag"
 	"net"
 	"os"
 	"sync"
@@ -25,7 +24,7 @@ type clientAgent struct {
 	injector inputInjector
 
 	mu           sync.Mutex
-	conn         net.Conn
+	conn         *tls.Conn
 	writeMu      sync.Mutex
 	pendingID    string
 	activeID     string
@@ -43,25 +42,12 @@ type clientAgent struct {
 func main() {
 	platformInit()
 
-	flagServer := flag.String("server", "", "Admin server address (dev override)")
-	flagPin := flag.String("pin", "", "Admin TLS cert SHA-256 fingerprint (dev override)")
-	flagToken := flag.String("token", "", "Admin shared auth token (dev override)")
-	flag.Parse()
-
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
 		hostname = "EQUIP"
 	}
 
 	cfg, cfgErr := config.ReadFromExecutable()
-	if cfgErr != nil && *flagServer != "" {
-		cfg = config.ClientConfig{
-			ServerAddr: *flagServer,
-			CertSHA256: *flagPin,
-			AuthToken:  *flagToken,
-		}
-		cfgErr = cfg.Validate()
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -94,7 +80,7 @@ func main() {
 		return
 	}
 
-	tlsCfg, err := security.PinnedClientTLSConfig(cfg.CertSHA256)
+	tlsCfg, err := security.MutualPinnedClientTLSConfig(cfg.CertSHA256, cfg.ClientCertDER, cfg.ClientKeyDER)
 	if err != nil {
 		go func() {
 			<-window.Ready()
@@ -161,6 +147,9 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	}
 	conn := rawConn.(*tls.Conn)
 	defer conn.Close()
+	if err := security.VerifyServerTLSConn(conn, a.cfg.CertSHA256); err != nil {
+		return errAuthRejected
+	}
 
 	if tc, ok := conn.NetConn().(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
@@ -287,14 +276,14 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 			}
 
 		case protocol.MsgMouse:
-			if a.isSessionActive() {
+			if a.isSessionActive() && a.verifyActiveServerConn(conn) {
 				if ev, err := protocol.DecodeMouse(data); err == nil {
 					a.injector.HandleMouse(ev, int(a.monitorIdx.Load()))
 				}
 			}
 
 		case protocol.MsgKey:
-			if a.isSessionActive() {
+			if a.isSessionActive() && a.verifyActiveServerConn(conn) {
 				if ev, err := protocol.DecodeKey(data); err == nil {
 					a.injector.HandleKey(ev)
 				}
@@ -372,8 +361,9 @@ func (a *clientAgent) onUserAllow() {
 	a.streamCancel = streamCancel
 	a.mu.Unlock()
 
-	if conn == nil {
+	if conn == nil || security.VerifyServerTLSConn(conn, a.cfg.CertSHA256) != nil {
 		streamCancel()
+		a.handleRemoteSessionStop(sid)
 		return
 	}
 
@@ -385,6 +375,8 @@ func (a *clientAgent) onUserAllow() {
 		return
 	}
 
+	// Only unlock OS input injection after strict mTLS 1.3 + pinned server cert + explicit user "Permetre".
+	a.injector.SetEnabled(true)
 	a.window.SetState(uiActive, "")
 	a.monitorIdx.Store(0) // Always start on Monitor 1
 	a.forceKeyframe.Store(true)
@@ -444,7 +436,7 @@ func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
 	a.mu.Unlock()
 
 	if changed {
-		a.injector.ReleaseAllKeys()
+		a.injector.SetEnabled(false)
 		if connected {
 			a.window.SetState(uiOnline, "En línia")
 		}
@@ -474,7 +466,7 @@ func (a *clientAgent) stopAllSessions(reason string) {
 	conn := a.conn
 	a.mu.Unlock()
 
-	a.injector.ReleaseAllKeys()
+	a.injector.SetEnabled(false)
 	if conn != nil && sid != "" {
 		_ = a.writeJSON(conn, protocol.MsgSessionStop, protocol.SessionStopPayload{
 			SessionID: sid,
@@ -489,7 +481,7 @@ func (a *clientAgent) cleanupAfterDisconnect() {
 	a.conn = nil
 	a.mu.Unlock()
 
-	a.injector.ReleaseAllKeys()
+	a.injector.SetEnabled(false)
 }
 
 func (a *clientAgent) isSessionActive() bool {
@@ -497,6 +489,10 @@ func (a *clientAgent) isSessionActive() bool {
 	active := a.activeID != ""
 	a.mu.Unlock()
 	return active
+}
+
+func (a *clientAgent) verifyActiveServerConn(conn *tls.Conn) bool {
+	return conn != nil && security.VerifyServerTLSConn(conn, a.cfg.CertSHA256) == nil
 }
 
 func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid string) {

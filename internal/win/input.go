@@ -4,6 +4,7 @@ package win
 
 import (
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -45,20 +46,42 @@ const (
 )
 
 // InputInjector wraps Win32 SendInput and tracks held keys so they can always be released cleanly.
+// Injection is disabled by default and MUST be explicitly enabled via SetEnabled(true) only after
+// strict mTLS server identity verification and explicit user consent.
 type InputInjector struct {
+	enabled  atomic.Bool
 	mu       sync.Mutex
 	heldKeys map[uint16]uint8 // vk -> flags
 }
 
-// NewInputInjector creates a new InputInjector.
+// NewInputInjector creates a new InputInjector (locked/disabled by default).
 func NewInputInjector() *InputInjector {
 	return &InputInjector{
 		heldKeys: make(map[uint16]uint8),
 	}
 }
 
+// SetEnabled opens or locks OS input injection. Locking immediately releases any held keys.
+func (inj *InputInjector) SetEnabled(enabled bool) {
+	inj.enabled.Store(enabled)
+	if !enabled {
+		inj.ReleaseAllKeys()
+	}
+}
+
+// Enabled reports whether OS input injection is currently permitted.
+func (inj *InputInjector) Enabled() bool {
+	return inj.enabled.Load()
+}
+
 // HandleMouse injects a normalized mouse event mapped to the active monitor (0 = Monitor 1, -1 = all monitors).
 func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent, monitorIndex int) {
+	if !inj.enabled.Load() {
+		return
+	}
+	if ev.Action > protocol.MouseHWheel || ev.Button > protocol.ButtonX2 {
+		return
+	}
 	dx, dy := mapNormalizedToVirtualDesk(ev.X, ev.Y, monitorIndex)
 	pkt := mouseInputPacket{
 		Type: inputMouse,
@@ -120,7 +143,10 @@ func mapNormalizedToVirtualDesk(normX, normY uint16, monitorIndex int) (int32, i
 
 // HandleKey injects a keyboard event via Win32 SendInput.
 func (inj *InputInjector) HandleKey(ev protocol.KeyEvent) {
-	if ev.VK == 0 || ev.VK > 0xFE {
+	if !inj.enabled.Load() {
+		return
+	}
+	if ev.Action > protocol.KeyUp || ev.VK == 0 || ev.VK > 0xFE || (ev.Flags&^protocol.KeyFlagExtended) != 0 {
 		return
 	}
 

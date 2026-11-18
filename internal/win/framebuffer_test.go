@@ -88,3 +88,43 @@ func TestFrameBufferApplyHybridTiles(t *testing.T) {
 		}
 	})
 }
+
+func TestFrameBufferRejectsMalformedAndBombFrames(t *testing.T) {
+	fb := NewFrameBuffer()
+
+	// 1. Short packet
+	if _, err := fb.ApplyFrame([]byte{1, 2, 3}); err == nil {
+		t.Fatal("expected error for short frame")
+	}
+
+	// 2. Oversized dimension bomb (16384x16384 would allocate 1 GiB)
+	var dimBomb [protocol.FrameHeaderSize]byte
+	binary.BigEndian.PutUint16(dimBomb[4:6], 16384)
+	binary.BigEndian.PutUint16(dimBomb[6:8], 16384)
+	binary.BigEndian.PutUint16(dimBomb[8:10], 1)
+	if _, err := fb.ApplyFrame(dimBomb[:]); err == nil {
+		t.Fatal("expected oversized dimensions to be rejected")
+	}
+
+	// 3. Tile count bomb (65535 tiles claimed in 10-byte packet)
+	var tileBomb [protocol.FrameHeaderSize]byte
+	binary.BigEndian.PutUint16(tileBomb[4:6], 64)
+	binary.BigEndian.PutUint16(tileBomb[6:8], 64)
+	binary.BigEndian.PutUint16(tileBomb[8:10], 65535)
+	if _, err := fb.ApplyFrame(tileBomb[:]); err == nil {
+		t.Fatal("expected excessive tile count to be rejected")
+	}
+
+	// 4. Truncated tile + integer-overflow dataLen (0xFFFFFFFF) must not panic.
+	var badTile [protocol.FrameHeaderSize + protocol.TileHeaderSize + 4]byte
+	binary.BigEndian.PutUint16(badTile[4:6], 64)
+	binary.BigEndian.PutUint16(badTile[6:8], 64)
+	binary.BigEndian.PutUint16(badTile[8:10], 1)
+	binary.BigEndian.PutUint16(badTile[14:16], 16)
+	binary.BigEndian.PutUint16(badTile[16:18], 16)
+	badTile[18] = protocol.TileCodecZlibBGR
+	binary.BigEndian.PutUint32(badTile[19:23], 0xFFFFFFFF)
+	if _, err := fb.ApplyFrame(badTile[:]); err != nil {
+		t.Fatalf("truncated tile should be safely ignored without panic, got err=%v", err)
+	}
+}

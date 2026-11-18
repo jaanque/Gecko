@@ -21,24 +21,41 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	}
 
 	srv := relay.NewServer(id)
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", security.ServerTLSConfig(id.Certificate))
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", security.ServerTLSConfig(id.Certificate, id.ClientCAs))
 	if err != nil {
 		t.Fatalf("tls.Listen failed: %v", err)
 	}
 	defer ln.Close()
 	go func() { _ = srv.Serve(ln) }()
 
-	clientTLS, err := security.PinnedClientTLSConfig(id.CertSHA256)
+	clientTLS, err := security.MutualPinnedClientTLSConfig(id.CertSHA256, id.ClientCertDER, id.ClientKeyDER)
 	if err != nil {
-		t.Fatalf("PinnedClientTLSConfig failed: %v", err)
+		t.Fatalf("MutualPinnedClientTLSConfig(client) failed: %v", err)
+	}
+	adminTLS, err := security.MutualPinnedClientTLSConfig(id.CertSHA256, id.AdminCertDER, id.AdminKeyDER)
+	if err != nil {
+		t.Fatalf("MutualPinnedClientTLSConfig(admin) failed: %v", err)
 	}
 
-	// 1. Role isolation: ClientToken MUST NOT authenticate as Admin.
+	// 0. mTLS enforcement: peer WITHOUT client certificate must be rejected at TLS handshake.
+	noCertConn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true,
+	})
+	if err == nil {
+		_, _, rerr := protocol.ReadMessage(noCertConn)
+		noCertConn.Close()
+		if rerr == nil {
+			t.Fatal("expected unauthenticated peer without mTLS cert to be rejected")
+		}
+	}
+
+	// 1. Role isolation: Client mTLS cert MUST NOT authenticate as Admin (even with valid AdminToken!).
 	badAdm, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	_ = protocol.WriteJSON(badAdm, protocol.MsgAdminAuth, protocol.AdminAuthPayload{Token: id.ClientToken})
+	_ = protocol.WriteJSON(badAdm, protocol.MsgAdminAuth, protocol.AdminAuthPayload{Token: id.AdminToken})
 	mType, data, err := protocol.ReadMessage(badAdm)
 	badAdm.Close()
 	if err != nil || mType != protocol.MsgAuthResp {
@@ -47,15 +64,15 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	var badResp protocol.AuthRespPayload
 	_ = json.Unmarshal(data, &badResp)
 	if badResp.OK {
-		t.Fatal("client token must be rejected on MsgAdminAuth")
+		t.Fatal("client mTLS cert must be rejected on MsgAdminAuth even with admin token")
 	}
 
-	// 2. Role isolation: AdminToken MUST NOT register as Client.
-	badCli, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
+	// 2. Role isolation: Admin mTLS cert MUST NOT register as Client (even with ClientToken!).
+	badCli, err := tls.Dial("tcp", ln.Addr().String(), adminTLS)
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	_ = protocol.WriteJSON(badCli, protocol.MsgAuth, protocol.AuthPayload{Token: id.AdminToken, Hostname: "FAKE"})
+	_ = protocol.WriteJSON(badCli, protocol.MsgAuth, protocol.AuthPayload{Token: id.ClientToken, Hostname: "FAKE"})
 	mType, data, err = protocol.ReadMessage(badCli)
 	badCli.Close()
 	if err != nil || mType != protocol.MsgAuthResp {
@@ -64,7 +81,7 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	badResp = protocol.AuthRespPayload{}
 	_ = json.Unmarshal(data, &badResp)
 	if badResp.OK {
-		t.Fatal("admin token must be rejected on MsgAuth")
+		t.Fatal("admin mTLS cert must be rejected on MsgAuth even with client token")
 	}
 
 	// 3. Connect real Admin RelayClient.
@@ -99,10 +116,14 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	})
 
 	if err := admClient.Configure(security.RelayProfile{
-		ServerAddr:  ln.Addr().String(),
-		CertSHA256:  id.CertSHA256,
-		AdminToken:  id.AdminToken,
-		ClientToken: id.ClientToken,
+		ServerAddr:    ln.Addr().String(),
+		CertSHA256:    id.CertSHA256,
+		AdminToken:    id.AdminToken,
+		ClientToken:   id.ClientToken,
+		AdminCertDER:  id.AdminCertDER,
+		AdminKeyDER:   id.AdminKeyDER,
+		ClientCertDER: id.ClientCertDER,
+		ClientKeyDER:  id.ClientKeyDER,
 	}); err != nil {
 		t.Fatalf("Configure failed: %v", err)
 	}
@@ -113,7 +134,7 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 		t.Fatal("admin did not connect to relay")
 	}
 
-	// Verify generated client binary uses ClientToken (NEVER AdminToken!).
+	// Verify generated client binary uses ClientToken + Client mTLS cert (NEVER Admin credentials!).
 	genBin, err := admClient.GenerateClientBinary([]byte("MZ\x90\x00fake-template"), nil)
 	if err != nil {
 		t.Fatalf("GenerateClientBinary failed: %v", err)
@@ -124,6 +145,9 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	}
 	if genCfg.AuthToken != id.ClientToken || genCfg.AuthToken == id.AdminToken {
 		t.Fatal("generated client must embed ClientToken, never AdminToken")
+	}
+	if !bytes.Equal(genCfg.ClientCertDER, id.ClientCertDER) || bytes.Equal(genCfg.ClientCertDER, id.AdminCertDER) {
+		t.Fatal("generated client must embed client mTLS cert, never admin mTLS cert")
 	}
 
 	// 4. Connect a simulated remote PC Client.
@@ -233,7 +257,7 @@ func TestRelayClientReconfigureDoesNotClobberConn(t *testing.T) {
 		t.Fatalf("LoadOrCreateIdentity failed: %v", err)
 	}
 	srv := relay.NewServer(id)
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", security.ServerTLSConfig(id.Certificate))
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", security.ServerTLSConfig(id.Certificate, id.ClientCAs))
 	if err != nil {
 		t.Fatalf("tls.Listen failed: %v", err)
 	}
@@ -257,10 +281,14 @@ func TestRelayClientReconfigureDoesNotClobberConn(t *testing.T) {
 
 	// Trigger a first connection, then immediately reconfigure/restart multiple times.
 	prof := security.RelayProfile{
-		ServerAddr:  ln.Addr().String(),
-		CertSHA256:  id.CertSHA256,
-		AdminToken:  id.AdminToken,
-		ClientToken: id.ClientToken,
+		ServerAddr:    ln.Addr().String(),
+		CertSHA256:    id.CertSHA256,
+		AdminToken:    id.AdminToken,
+		ClientToken:   id.ClientToken,
+		AdminCertDER:  id.AdminCertDER,
+		AdminKeyDER:   id.AdminKeyDER,
+		ClientCertDER: id.ClientCertDER,
+		ClientKeyDER:  id.ClientKeyDER,
 	}
 	for i := 0; i < 4; i++ {
 		if err := admClient.Configure(prof); err != nil {

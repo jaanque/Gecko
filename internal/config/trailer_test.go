@@ -25,10 +25,12 @@ func TestTrailerAppendAndRead(t *testing.T) {
 	}
 
 	cfg1 := ClientConfig{
-		ServerAddr: "192.168.1.50:9443",
-		CertSHA256: strings.Repeat("a", 64),
-		AuthToken:  "0123456789abcdef0123456789abcdef",
-		LogoPNG:    normLogo,
+		ServerAddr:    "192.168.1.50:9443",
+		CertSHA256:    strings.Repeat("a", 64),
+		AuthToken:     "0123456789abcdef0123456789abcdef",
+		ClientCertDER: []byte("cert-der-1"),
+		ClientKeyDER:  []byte("key-der-1"),
+		LogoPNG:       normLogo,
 	}
 
 	built, err := AppendToBinary(base, cfg1)
@@ -40,15 +42,19 @@ func TestTrailerAppendAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFromBytes failed: %v", err)
 	}
-	if got.ServerAddr != cfg1.ServerAddr || got.CertSHA256 != cfg1.CertSHA256 || got.AuthToken != cfg1.AuthToken || !bytes.Equal(got.LogoPNG, cfg1.LogoPNG) {
+	if got.ServerAddr != cfg1.ServerAddr || got.CertSHA256 != cfg1.CertSHA256 || got.AuthToken != cfg1.AuthToken ||
+		!bytes.Equal(got.ClientCertDER, cfg1.ClientCertDER) || !bytes.Equal(got.ClientKeyDER, cfg1.ClientKeyDER) ||
+		!bytes.Equal(got.LogoPNG, cfg1.LogoPNG) {
 		t.Fatalf("mismatch: got %+v, want %+v", got, cfg1)
 	}
 
 	// Re-embedding should replace the previous trailer cleanly.
 	cfg2 := ClientConfig{
-		ServerAddr: "10.0.0.5:9443",
-		CertSHA256: strings.Repeat("b", 64),
-		AuthToken:  "fedcba9876543210fedcba9876543210",
+		ServerAddr:    "10.0.0.5:9443",
+		CertSHA256:    strings.Repeat("b", 64),
+		AuthToken:     "fedcba9876543210fedcba9876543210",
+		ClientCertDER: []byte("cert-der-2"),
+		ClientKeyDER:  []byte("key-der-2"),
 	}
 	rebuilt, err := AppendToBinary(built, cfg2)
 	if err != nil {

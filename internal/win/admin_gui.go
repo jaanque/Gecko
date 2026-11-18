@@ -974,7 +974,7 @@ func (a *AdminWindow) paintServerTab(memDC uintptr, cw, ch int32, hasProfile, re
 	drawText(memDC, "Dirección (host:puerto)", &l1, dtLeft|dtSingleLn|dtVCenter)
 
 	l2 := rect{innerL, keyY, rightEdge, keyY + a.scale(20)}
-	drawText(memDC, "Clave (RMT1:...)", &l2, dtLeft|dtSingleLn|dtVCenter)
+	drawText(memDC, "Clave (RMT2:...)", &l2, dtLeft|dtSingleLn|dtVCenter)
 
 	pasteW := a.scale(78)
 	pasteH := a.scale(28)

@@ -7,11 +7,19 @@ import (
 	"log"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
+)
+
+const (
+	maxConcurrentHandshakes = 64
+	maxHostnameRunes        = 64
+	maxReportedMonitors     = 16
 )
 
 type peerConn struct {
@@ -59,9 +67,10 @@ type bridgeSession struct {
 	active   bool
 }
 
-// Server acts as a secure TLS 1.3 bridge between Admin apps and Client PCs across different networks.
+// Server acts as a secure mTLS 1.3 bridge between Admin apps and Client PCs across different networks.
 type Server struct {
-	identity *security.ServerIdentity
+	identity     *security.ServerIdentity
+	handshakeSem chan struct{}
 
 	mu       sync.RWMutex
 	clients  map[string]*clientPeer
@@ -72,14 +81,15 @@ type Server struct {
 // NewServer creates a Relay bridge server.
 func NewServer(identity *security.ServerIdentity) *Server {
 	return &Server{
-		identity: identity,
-		clients:  make(map[string]*clientPeer),
-		admins:   make(map[string]*adminPeer),
-		sessions: make(map[string]*bridgeSession),
+		identity:     identity,
+		handshakeSem: make(chan struct{}, maxConcurrentHandshakes),
+		clients:      make(map[string]*clientPeer),
+		admins:       make(map[string]*adminPeer),
+		sessions:     make(map[string]*bridgeSession),
 	}
 }
 
-// Serve accepts incoming TLS 1.3 connections from both Admins and Clients until ln is closed.
+// Serve accepts incoming mTLS 1.3 connections from both Admins and Clients until ln is closed.
 func (s *Server) Serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
@@ -89,36 +99,65 @@ func (s *Server) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		go s.handleConn(conn)
+		select {
+		case s.handshakeSem <- struct{}{}:
+			go s.handleConn(conn)
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
 func (s *Server) handleConn(rawConn net.Conn) {
 	defer rawConn.Close()
-
-	if tlsConn, ok := rawConn.(*tls.Conn); ok {
-		if tc, ok := tlsConn.NetConn().(*net.TCPConn); ok {
-			_ = tc.SetNoDelay(true)
-			_ = tc.SetReadBuffer(512 * 1024)
-			_ = tc.SetWriteBuffer(512 * 1024)
-		}
-		_ = tlsConn.SetDeadline(time.Now().Add(10 * time.Second))
-		if err := tlsConn.Handshake(); err != nil {
-			return
+	semReleased := false
+	releaseSem := func() {
+		if !semReleased {
+			semReleased = true
+			<-s.handshakeSem
 		}
 	}
+	defer releaseSem()
 
-	_ = rawConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	tlsConn, ok := rawConn.(*tls.Conn)
+	if !ok {
+		return
+	}
+	if tc, ok := tlsConn.NetConn().(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(512 * 1024)
+		_ = tc.SetWriteBuffer(512 * 1024)
+	}
+	_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := tlsConn.Handshake(); err != nil {
+		return
+	}
+	// Verify Mutual TLS 1.3 client certificate and extract cryptographically signed role ("admin" or "client").
+	peerRole, err := security.PeerRoleFromTLS(tlsConn)
+	if err != nil {
+		return
+	}
+
+	_ = rawConn.SetReadDeadline(time.Now().Add(8 * time.Second))
 	msgType, payload, err := protocol.ReadMessage(rawConn)
 	if err != nil {
 		return
 	}
 
-	switch msgType {
-	case protocol.MsgAuth:
+	// Release handshake slot once mTLS + initial auth message arrived.
+	releaseSem()
+
+	switch {
+	case msgType == protocol.MsgAuth && peerRole == security.RoleClient:
 		s.serveClient(rawConn, payload)
-	case protocol.MsgAdminAuth:
+	case msgType == protocol.MsgAdminAuth && peerRole == security.RoleAdmin:
 		s.serveAdmin(rawConn, payload)
+	default:
+		_ = rawConn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		_ = protocol.WriteJSON(rawConn, protocol.MsgAuthResp, protocol.AuthRespPayload{
+			OK:    false,
+			Error: "rol mTLS no autorizado",
+		})
 	}
 }
 
@@ -142,13 +181,23 @@ func (s *Server) serveClient(rawConn net.Conn, payload []byte) {
 	}
 
 	ip := remoteIP(rawConn)
-	hostname := auth.Hostname
+	hostname := sanitizeHostname(auth.Hostname)
 	if hostname == "" {
 		hostname = "EQUIPO-" + clientID[:4]
 	}
 	monCount := len(auth.Monitors)
 	if monCount < 1 {
 		monCount = 1
+	} else if monCount > maxReportedMonitors {
+		monCount = maxReportedMonitors
+	}
+	width := auth.Width
+	height := auth.Height
+	if width < 0 || width > 8192 {
+		width = 0
+	}
+	if height < 0 || height > 8192 {
+		height = 0
 	}
 
 	cp := &clientPeer{
@@ -156,8 +205,8 @@ func (s *Server) serveClient(rawConn net.Conn, payload []byte) {
 		id:           clientID,
 		hostname:     hostname,
 		ip:           ip,
-		width:        auth.Width,
-		height:       auth.Height,
+		width:        width,
+		height:       height,
 		monitorCount: monCount,
 		status:       "online",
 	}
@@ -300,9 +349,33 @@ func (s *Server) serveAdmin(rawConn net.Conn, payload []byte) {
 			}
 			s.endAdminSession(ap, reason)
 
-		case protocol.MsgFrameAck, protocol.MsgMouse, protocol.MsgKey, protocol.MsgStreamConfig:
-			if cp := s.activeClientForAdmin(ap); cp != nil {
-				_ = cp.writeMessage(mType, data)
+		case protocol.MsgFrameAck:
+			if _, err := protocol.DecodeFrameAck(data); err == nil {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
+
+		case protocol.MsgMouse:
+			if _, err := protocol.DecodeMouse(data); err == nil {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
+
+		case protocol.MsgKey:
+			if _, err := protocol.DecodeKey(data); err == nil {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
+
+		case protocol.MsgStreamConfig:
+			var sc protocol.StreamConfigPayload
+			if json.Unmarshal(data, &sc) == nil {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
 			}
 		}
 	}
@@ -577,4 +650,20 @@ func remoteIP(conn net.Conn) string {
 		return conn.RemoteAddr().String()
 	}
 	return host
+}
+
+func sanitizeHostname(raw string) string {
+	var b strings.Builder
+	count := 0
+	for _, r := range strings.TrimSpace(raw) {
+		if unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+		count++
+		if count >= maxHostnameRunes {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
 }

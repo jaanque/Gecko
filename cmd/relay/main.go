@@ -46,7 +46,7 @@ func main() {
 		log.Fatalf("Error inicializando TLS: %v", err)
 	}
 
-	ln, err := tls.Listen("tcp", *listenAddr, security.ServerTLSConfig(identity.Certificate))
+	ln, err := tls.Listen("tcp", *listenAddr, security.ServerTLSConfig(identity.Certificate, identity.ClientCAs))
 	if err != nil {
 		log.Fatalf("No se pudo abrir %s: %v", *listenAddr, err)
 	}
@@ -57,10 +57,14 @@ func main() {
 	resolvedAddr := resolveConnectAddr(*publicAddr, port, lanIP)
 
 	key, err := security.EncodeProfileKey(security.RelayProfile{
-		ServerAddr:  resolvedAddr,
-		CertSHA256:  identity.CertSHA256,
-		AdminToken:  identity.AdminToken,
-		ClientToken: identity.ClientToken,
+		ServerAddr:    resolvedAddr,
+		CertSHA256:    identity.CertSHA256,
+		AdminToken:    identity.AdminToken,
+		ClientToken:   identity.ClientToken,
+		AdminCertDER:  identity.AdminCertDER,
+		AdminKeyDER:   identity.AdminKeyDER,
+		ClientCertDER: identity.ClientCertDER,
+		ClientKeyDER:  identity.ClientKeyDER,
 	})
 	if err != nil {
 		log.Fatalf("Error generando clave: %v", err)

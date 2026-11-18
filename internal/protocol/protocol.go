@@ -9,10 +9,13 @@ import (
 )
 
 const (
-	MaxPayloadSize  = 16 * 1024 * 1024 // 16 MiB hard cap per message
-	HeaderSize      = 5
-	FrameHeaderSize = 10 // frameID(4) + width(2) + height(2) + tileCount(2)
-	TileHeaderSize  = 13 // x(2) + y(2) + w(2) + h(2) + codec(1) + dataLen(4)
+	MaxPayloadSize        = 16 * 1024 * 1024 // 16 MiB hard cap for MsgFrame
+	MaxControlPayloadSize = 16 * 1024        // 16 KiB hard cap for JSON control messages
+	MaxListPayloadSize    = 512 * 1024       // 512 KiB hard cap for MsgClientList
+	MaxPingPayloadSize    = 64               // 64 bytes hard cap for MsgPing/MsgPong
+	HeaderSize            = 5
+	FrameHeaderSize       = 10 // frameID(4) + width(2) + height(2) + tileCount(2)
+	TileHeaderSize        = 13 // x(2) + y(2) + w(2) + h(2) + codec(1) + dataLen(4)
 )
 
 // Message types.
@@ -192,18 +195,25 @@ func EncodeMouse(ev MouseEvent) []byte {
 	return buf[:]
 }
 
-// DecodeMouse parses an 8-byte MouseEvent.
+// DecodeMouse parses and strictly validates an 8-byte MouseEvent.
 func DecodeMouse(b []byte) (MouseEvent, error) {
 	if len(b) != 8 {
 		return MouseEvent{}, fmt.Errorf("invalid mouse event size: %d", len(b))
 	}
-	return MouseEvent{
+	ev := MouseEvent{
 		Action: b[0],
 		Button: b[1],
 		X:      binary.BigEndian.Uint16(b[2:4]),
 		Y:      binary.BigEndian.Uint16(b[4:6]),
 		Delta:  int16(binary.BigEndian.Uint16(b[6:8])),
-	}, nil
+	}
+	if ev.Action > MouseHWheel {
+		return MouseEvent{}, fmt.Errorf("invalid mouse action: %d", ev.Action)
+	}
+	if ev.Button > ButtonX2 {
+		return MouseEvent{}, fmt.Errorf("invalid mouse button: %d", ev.Button)
+	}
+	return ev, nil
 }
 
 // EncodeKey serializes a KeyEvent to 6 bytes.
@@ -216,23 +226,62 @@ func EncodeKey(ev KeyEvent) []byte {
 	return buf[:]
 }
 
-// DecodeKey parses a 6-byte KeyEvent.
+// DecodeKey parses and strictly validates a 6-byte KeyEvent.
 func DecodeKey(b []byte) (KeyEvent, error) {
 	if len(b) != 6 {
 		return KeyEvent{}, fmt.Errorf("invalid key event size: %d", len(b))
 	}
-	return KeyEvent{
+	ev := KeyEvent{
 		Action: b[0],
 		VK:     binary.BigEndian.Uint16(b[1:3]),
 		Scan:   binary.BigEndian.Uint16(b[3:5]),
 		Flags:  b[5],
-	}, nil
+	}
+	if ev.Action > KeyUp {
+		return KeyEvent{}, fmt.Errorf("invalid key action: %d", ev.Action)
+	}
+	if ev.VK == 0 || ev.VK > 0xFE {
+		return KeyEvent{}, fmt.Errorf("invalid virtual key: 0x%X", ev.VK)
+	}
+	if (ev.Flags &^ KeyFlagExtended) != 0 {
+		return KeyEvent{}, fmt.Errorf("invalid key flags: 0x%X", ev.Flags)
+	}
+	return ev, nil
 }
 
-// WriteMessage writes a length-prefixed binary message to w.
+// MaxPayloadForType returns the maximum permitted payload size for a known message type.
+// Unknown message types return (0, false) and are rejected before allocation.
+func MaxPayloadForType(msgType uint8) (uint32, bool) {
+	switch msgType {
+	case MsgAuth, MsgAuthResp, MsgAdminAuth, MsgAdminConnect,
+		MsgConsentReq, MsgConsentResp, MsgSessionStop,
+		MsgStreamConfig, MsgSessionEvent:
+		return MaxControlPayloadSize, true
+	case MsgClientList:
+		return MaxListPayloadSize, true
+	case MsgPing, MsgPong:
+		return MaxPingPayloadSize, true
+	case MsgFrame:
+		return MaxPayloadSize, true
+	case MsgFrameAck:
+		return 4, true
+	case MsgMouse:
+		return 8, true
+	case MsgKey:
+		return 6, true
+	default:
+		return 0, false
+	}
+}
+
+// WriteMessage writes a length-prefixed binary message to w after verifying type and size limits.
 func WriteMessage(w io.Writer, msgType uint8, payload []byte) error {
-	if len(payload) > MaxPayloadSize {
-		return fmt.Errorf("payload exceeds max size (%d > %d)", len(payload), MaxPayloadSize)
+	limit, ok := MaxPayloadForType(msgType)
+	if !ok {
+		return fmt.Errorf("unknown message type: 0x%02X", msgType)
+	}
+	if uint64(len(payload)) > uint64(limit) {
+		return fmt.Errorf("payload exceeds max size for type 0x%02X (%d > %d)", msgType, len(payload), limit)
 	}
 	var hdr [HeaderSize]byte
 	hdr[0] = msgType
@@ -255,16 +304,21 @@ func WriteJSON(w io.Writer, msgType uint8, v any) error {
 	return WriteMessage(w, msgType, data)
 }
 
-// ReadMessage reads one length-prefixed binary message from r.
+// ReadMessage reads one length-prefixed binary message from r, strictly enforcing
+// known message types and per-type payload size limits before allocating memory.
 func ReadMessage(r io.Reader) (uint8, []byte, error) {
 	var hdr [HeaderSize]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return 0, nil, err
 	}
 	msgType := hdr[0]
+	limit, ok := MaxPayloadForType(msgType)
+	if !ok {
+		return 0, nil, fmt.Errorf("unknown message type: 0x%02X", msgType)
+	}
 	length := binary.BigEndian.Uint32(hdr[1:5])
-	if length > MaxPayloadSize {
-		return 0, nil, errors.New("message payload exceeds limit")
+	if length > limit {
+		return 0, nil, errors.New("message payload exceeds limit for type")
 	}
 	if length == 0 {
 		return msgType, nil, nil

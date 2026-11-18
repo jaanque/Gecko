@@ -19,15 +19,17 @@ const (
 
 var ErrNoEmbeddedConfig = errors.New("no embedded client config found")
 
-// ClientConfig holds the connection, security, and optional logo embedded into ClienteRemoto.exe.
+// ClientConfig holds the connection, mTLS credentials, and optional logo embedded into ClientRemot.
 type ClientConfig struct {
-	ServerAddr string `json:"server_addr"`
-	CertSHA256 string `json:"cert_sha256"`
-	AuthToken  string `json:"auth_token"`
-	LogoPNG    []byte `json:"logo_png,omitempty"`
+	ServerAddr    string `json:"server_addr"`
+	CertSHA256    string `json:"cert_sha256"`
+	AuthToken     string `json:"auth_token"`
+	ClientCertDER []byte `json:"client_cert_der"`
+	ClientKeyDER  []byte `json:"client_key_der"`
+	LogoPNG       []byte `json:"logo_png,omitempty"`
 }
 
-// Validate checks that all required fields are present.
+// Validate checks that all required fields and mTLS credentials are present.
 func (c ClientConfig) Validate() error {
 	if c.ServerAddr == "" {
 		return errors.New("server_addr is required")
@@ -37,6 +39,9 @@ func (c ClientConfig) Validate() error {
 	}
 	if len(c.AuthToken) < 16 {
 		return errors.New("auth_token is invalid")
+	}
+	if len(c.ClientCertDER) == 0 || len(c.ClientKeyDER) == 0 {
+		return errors.New("client mTLS certificate and key are required")
 	}
 	return nil
 }

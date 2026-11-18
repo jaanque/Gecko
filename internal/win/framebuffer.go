@@ -69,6 +69,14 @@ type decodedTileResult struct {
 	bgr        []byte
 }
 
+const (
+	maxFrameWidth    = 8192
+	maxFrameHeight   = 8192
+	maxFramePixels   = 7680 * 4320 // 8K UHD hard cap (~132 MiB max BGRA buffer)
+	maxTilesPerFrame = 8192
+	maxTileDim       = 256
+)
+
 // ApplyFrame decodes a binary MsgFrame payload (hybrid JPEG + lossless Zlib-BGR tiles)
 // in parallel and applies all tiles atomically into the BGRA framebuffer.
 func (fb *FrameBuffer) ApplyFrame(data []byte) (FrameMeta, error) {
@@ -81,17 +89,25 @@ func (fb *FrameBuffer) ApplyFrame(data []byte) (FrameMeta, error) {
 		Height:  int(binary.BigEndian.Uint16(data[6:8])),
 	}
 	tileCount := int(binary.BigEndian.Uint16(data[8:10]))
-	if meta.Width <= 0 || meta.Height <= 0 || meta.Width > 16384 || meta.Height > 16384 {
+	if meta.Width <= 0 || meta.Height <= 0 || meta.Width > maxFrameWidth || meta.Height > maxFrameHeight ||
+		meta.Width*meta.Height > maxFramePixels {
 		return FrameMeta{}, errors.New("invalid screen dimensions in frame")
 	}
 	if tileCount == 0 {
 		return meta, nil
 	}
+	if tileCount > maxTilesPerFrame {
+		return FrameMeta{}, errors.New("frame tile count exceeds limit")
+	}
 
+	maxPossibleTiles := (len(data) - protocol.FrameHeaderSize) / protocol.TileHeaderSize
+	if tileCount > maxPossibleTiles {
+		tileCount = maxPossibleTiles
+	}
 	rawTiles := make([]rawTile, 0, tileCount)
 	off := protocol.FrameHeaderSize
 	for i := 0; i < tileCount; i++ {
-		if off+protocol.TileHeaderSize > len(data) {
+		if off > len(data)-protocol.TileHeaderSize {
 			break
 		}
 		tx := int(binary.BigEndian.Uint16(data[off : off+2]))
@@ -99,17 +115,26 @@ func (fb *FrameBuffer) ApplyFrame(data []byte) (FrameMeta, error) {
 		tw := int(binary.BigEndian.Uint16(data[off+4 : off+6]))
 		th := int(binary.BigEndian.Uint16(data[off+6 : off+8]))
 		codec := data[off+8]
-		dlen := int(binary.BigEndian.Uint32(data[off+9 : off+13]))
+		dlenU32 := binary.BigEndian.Uint32(data[off+9 : off+13])
 		off += protocol.TileHeaderSize
-		if dlen <= 0 || off+dlen > len(data) {
+		if dlenU32 == 0 || uint64(dlenU32) > uint64(len(data)-off) {
 			break
+		}
+		dlen := int(dlenU32)
+		payload := data[off : off+dlen]
+		off += dlen
+
+		if tw <= 0 || th <= 0 || tw > maxTileDim || th > maxTileDim {
+			continue
+		}
+		if tx >= meta.Width || ty >= meta.Height {
+			continue
 		}
 		rawTiles = append(rawTiles, rawTile{
 			x: tx, y: ty, w: tw, h: th,
 			codec:   codec,
-			payload: data[off : off+dlen],
+			payload: payload,
 		})
-		off += dlen
 	}
 	if len(rawTiles) == 0 {
 		return meta, nil
@@ -167,26 +192,29 @@ func (fb *FrameBuffer) ApplyFrame(data []byte) (FrameMeta, error) {
 }
 
 func decodeRawTile(rt rawTile) decodedTileResult {
+	if rt.w <= 0 || rt.h <= 0 || rt.w > maxTileDim || rt.h > maxTileDim {
+		return decodedTileResult{}
+	}
 	switch rt.codec {
 	case protocol.TileCodecZlibBGR:
 		zr, err := zlib.NewReader(bytes.NewReader(rt.payload))
 		if err != nil {
 			return decodedTileResult{}
 		}
+		defer zr.Close()
+
 		expected := rt.w * rt.h * 3
-		if expected <= 0 || expected > 256*256*3 {
-			_ = zr.Close()
-			return decodedTileResult{}
-		}
 		bgr := make([]byte, expected)
-		_, err = io.ReadFull(zr, bgr)
-		_ = zr.Close()
-		if err != nil {
+		if _, err := io.ReadFull(io.LimitReader(zr, int64(expected)+1), bgr); err != nil {
 			return decodedTileResult{}
 		}
 		return decodedTileResult{x: rt.x, y: rt.y, w: rt.w, h: rt.h, bgr: bgr}
 
 	case protocol.TileCodecJPEG:
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(rt.payload))
+		if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > maxTileDim || cfg.Height > maxTileDim {
+			return decodedTileResult{}
+		}
 		img, err := jpeg.Decode(bytes.NewReader(rt.payload))
 		if err != nil {
 			return decodedTileResult{}
@@ -259,6 +287,9 @@ func blitImageToBGRA(dst []byte, dstW, dstH, tx, ty int, src image.Image) {
 
 			switch img.SubsampleRatio {
 			case image.YCbCrSubsampleRatio420, image.YCbCrSubsampleRatio422:
+				if yi < 0 || yi+w > len(img.Y) || ci < 0 || ci+((w-1)>>1) >= len(img.Cb) || ci+((w-1)>>1) >= len(img.Cr) {
+					continue
+				}
 				for x := 0; x < w; x++ {
 					yy := img.Y[yi+x]
 					cb := img.Cb[ci+(x>>1)]
@@ -271,6 +302,9 @@ func blitImageToBGRA(dst []byte, dstW, dstH, tx, ty int, src image.Image) {
 					dst[o+3] = 255
 				}
 			case image.YCbCrSubsampleRatio444:
+				if yi < 0 || yi+w > len(img.Y) || ci < 0 || ci+w > len(img.Cb) || ci+w > len(img.Cr) {
+					continue
+				}
 				for x := 0; x < w; x++ {
 					r, g, bl := color.YCbCrToRGB(img.Y[yi+x], img.Cb[ci+x], img.Cr[ci+x])
 					o := dstOff + x*4
@@ -282,9 +316,12 @@ func blitImageToBGRA(dst []byte, dstW, dstH, tx, ty int, src image.Image) {
 			default:
 				for x := 0; x < w; x++ {
 					sx := b.Min.X + x
-					yy := img.Y[img.YOffset(sx, sy)]
+					yo := img.YOffset(sx, sy)
 					co := img.COffset(sx, sy)
-					r, g, bl := color.YCbCrToRGB(yy, img.Cb[co], img.Cr[co])
+					if yo < 0 || yo >= len(img.Y) || co < 0 || co >= len(img.Cb) || co >= len(img.Cr) {
+						continue
+					}
+					r, g, bl := color.YCbCrToRGB(img.Y[yo], img.Cb[co], img.Cr[co])
 					o := dstOff + x*4
 					dst[o+0] = bl
 					dst[o+1] = g

@@ -5,6 +5,7 @@ package linux
 import (
 	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"remote-control/internal/protocol"
@@ -19,7 +20,10 @@ const (
 )
 
 // InputInjector injects remote mouse and keyboard events into X11 via the XTEST extension.
+// Injection is disabled by default and MUST be explicitly enabled via SetEnabled(true) only after
+// strict mTLS server identity verification and explicit user consent.
 type InputInjector struct {
+	enabled      atomic.Bool
 	mu           sync.Mutex
 	xc           *x11Conn
 	xtestMajor   byte
@@ -31,13 +35,26 @@ type InputInjector struct {
 	cachedBounds MonitorBounds
 }
 
-// NewInputInjector constructs a Linux XTEST InputInjector.
+// NewInputInjector constructs a Linux XTEST InputInjector (locked/disabled by default).
 func NewInputInjector() *InputInjector {
 	return &InputInjector{
 		symToCode:  make(map[uint32]byte),
 		heldCodes:  make(map[byte]bool),
 		lastMonIdx: -999,
 	}
+}
+
+// SetEnabled opens or locks OS input injection. Locking immediately releases any held keys.
+func (inj *InputInjector) SetEnabled(enabled bool) {
+	inj.enabled.Store(enabled)
+	if !enabled {
+		inj.ReleaseAllKeys()
+	}
+}
+
+// Enabled reports whether OS input injection is currently permitted.
+func (inj *InputInjector) Enabled() bool {
+	return inj.enabled.Load()
 }
 
 func (inj *InputInjector) ensureConnLocked() bool {
@@ -134,6 +151,12 @@ func (inj *InputInjector) mapCoordsLocked(normX, normY uint16, monitorIndex int)
 
 // HandleMouse injects a normalized mouse event mapped to the active monitor (0 = Monitor 1, -1 = all monitors).
 func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent, monitorIndex int) {
+	if !inj.enabled.Load() {
+		return
+	}
+	if ev.Action > protocol.MouseHWheel || ev.Button > protocol.ButtonX2 {
+		return
+	}
 	inj.mu.Lock()
 	defer inj.mu.Unlock()
 
@@ -219,7 +242,10 @@ func mapMouseButton(btn uint8) byte {
 
 // HandleKey injects a keyboard event via XTEST.
 func (inj *InputInjector) HandleKey(ev protocol.KeyEvent) {
-	if ev.VK == 0 || ev.VK > 0xFE {
+	if !inj.enabled.Load() {
+		return
+	}
+	if ev.Action > protocol.KeyUp || ev.VK == 0 || ev.VK > 0xFE || (ev.Flags&^protocol.KeyFlagExtended) != 0 {
 		return
 	}
 

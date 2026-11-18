@@ -60,7 +60,7 @@ Abre el puerto **TCP 9443** en el firewall del servidor y ejecútalo:
 
 Al iniciar imprimirá:
 - **`Direccion:`** `host:9443`
-- **`Clave:`** `RMT1:...`
+- **`Clave:`** `RMT2:...`
 
 ### 2. Conectar y generar el cliente
 

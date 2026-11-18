@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -42,5 +43,50 @@ func TestBinaryEventCodecs(t *testing.T) {
 	ack2, err := DecodeFrameAck(EncodeFrameAck(42))
 	if err != nil || ack2 != 42 {
 		t.Fatalf("ack mismatch: got %d err=%v", ack2, err)
+	}
+}
+
+func TestStrictMessageAndEventValidation(t *testing.T) {
+	// Unknown message type must be rejected before reading payload.
+	var badType [HeaderSize]byte
+	badType[0] = 0xFE
+	binary.BigEndian.PutUint32(badType[1:5], 10)
+	if _, _, err := ReadMessage(bytes.NewReader(badType[:])); err == nil {
+		t.Fatal("expected unknown message type to be rejected")
+	}
+
+	// Oversized control message (e.g. MsgAuth claiming 1 MiB) must be rejected immediately.
+	var bigAuth [HeaderSize]byte
+	bigAuth[0] = MsgAuth
+	binary.BigEndian.PutUint32(bigAuth[1:5], 1024*1024)
+	if _, _, err := ReadMessage(bytes.NewReader(bigAuth[:])); err == nil {
+		t.Fatal("expected oversized MsgAuth to be rejected")
+	}
+
+	// Oversized MsgMouse (> 8 bytes) must be rejected immediately.
+	var bigMouse [HeaderSize]byte
+	bigMouse[0] = MsgMouse
+	binary.BigEndian.PutUint32(bigMouse[1:5], 16)
+	if _, _, err := ReadMessage(bytes.NewReader(bigMouse[:])); err == nil {
+		t.Fatal("expected oversized MsgMouse to be rejected")
+	}
+
+	// Invalid mouse action / button must be rejected.
+	if _, err := DecodeMouse(EncodeMouse(MouseEvent{Action: 99, Button: ButtonLeft})); err == nil {
+		t.Fatal("expected invalid mouse action to fail")
+	}
+	if _, err := DecodeMouse(EncodeMouse(MouseEvent{Action: MouseDown, Button: 99})); err == nil {
+		t.Fatal("expected invalid mouse button to fail")
+	}
+
+	// Invalid key action / VK / flags must be rejected.
+	if _, err := DecodeKey(EncodeKey(KeyEvent{Action: 5, VK: 0x41})); err == nil {
+		t.Fatal("expected invalid key action to fail")
+	}
+	if _, err := DecodeKey(EncodeKey(KeyEvent{Action: KeyDown, VK: 0})); err == nil {
+		t.Fatal("expected VK=0 to fail")
+	}
+	if _, err := DecodeKey(EncodeKey(KeyEvent{Action: KeyDown, VK: 0x41, Flags: 0x80})); err == nil {
+		t.Fatal("expected unknown key flags to fail")
 	}
 }

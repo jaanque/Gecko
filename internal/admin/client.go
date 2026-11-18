@@ -86,7 +86,7 @@ func (c *RelayClient) Configure(p security.RelayProfile) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
-	if _, err := security.PinnedClientTLSConfig(p.CertSHA256); err != nil {
+	if _, err := security.MutualPinnedClientTLSConfig(p.CertSHA256, p.AdminCertDER, p.AdminKeyDER); err != nil {
 		return err
 	}
 
@@ -171,10 +171,12 @@ func (c *RelayClient) GenerateClientBinary(template []byte, logoPNG []byte) ([]b
 	}
 
 	return config.AppendToBinary(template, config.ClientConfig{
-		ServerAddr: prof.ServerAddr,
-		CertSHA256: prof.CertSHA256,
-		AuthToken:  prof.ClientToken,
-		LogoPNG:    logoPNG,
+		ServerAddr:    prof.ServerAddr,
+		CertSHA256:    prof.CertSHA256,
+		AuthToken:     prof.ClientToken,
+		ClientCertDER: prof.ClientCertDER,
+		ClientKeyDER:  prof.ClientKeyDER,
+		LogoPNG:       logoPNG,
 	})
 }
 
@@ -259,9 +261,9 @@ func (c *RelayClient) isCurrentGen(gen uint64) bool {
 }
 
 func (c *RelayClient) runLoop(ctx context.Context, gen uint64, prof security.RelayProfile) {
-	tlsCfg, err := security.PinnedClientTLSConfig(prof.CertSHA256)
+	tlsCfg, err := security.MutualPinnedClientTLSConfig(prof.CertSHA256, prof.AdminCertDER, prof.AdminKeyDER)
 	if err != nil {
-		c.emitStatus(gen, false, "Certificado TLS inválido")
+		c.emitStatus(gen, false, "Certificado mTLS inválido")
 		return
 	}
 
@@ -320,6 +322,10 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 		return fmt.Errorf("sin conexión (%s)", prof.ServerAddr)
 	}
 	conn := rawConn.(*tls.Conn)
+	if err := security.VerifyServerTLSConn(conn, prof.CertSHA256); err != nil {
+		_ = conn.Close()
+		return errors.New("identidad TLS del servidor no verificada")
+	}
 	defer func() {
 		c.mu.Lock()
 		if c.conn == conn {
