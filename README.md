@@ -2,67 +2,92 @@
 
 # 🦎 Gecko
 
-**Suport i control remot per a Windows: natiu, lleuger, privat i de codi obert.**
+**Control i suport remot per a Windows.**  
+*Natiu · Lleuger · Segur · Codi Obert*
 
 [![CI](https://github.com/jaanque/Gecko/actions/workflows/ci.yml/badge.svg)](https://github.com/jaanque/Gecko/actions/workflows/ci.yml)
-[![Llicència: MIT](https://img.shields.io/badge/llicència-MIT-18181B)](LICENSE)
-![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)
-![Windows](https://img.shields.io/badge/plataforma-Windows%20(amd64%20%7C%20arm64)-0078D4?logo=windows&logoColor=white)
-
-*Connecta i assisteix equips Windows des de qualsevol xarxa, sense instal·lacions al client, sense serveis de tercers i amb control total sobre la teva infraestructura.*
-
-[Per què Gecko?](#-per-què-gecko) · [Com funciona](#-com-funciona) · [Inici ràpid](#-inici-ràpid) · [Documentació](docs/PRODUCCIO.md) · [Contribuir](CONTRIBUTING.md)
+[![Llicència: MIT](https://img.shields.io/badge/Llicència-MIT-18181B.svg)](LICENSE)
+![Windows](https://img.shields.io/badge/Plataforma-Windows%20(amd64%20%7C%20arm64)-0078D4.svg?logo=windows&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8.svg?logo=go&logoColor=white)
+![Zero Dependencies](https://img.shields.io/badge/Dependències-0-16A34A.svg)
 
 </div>
 
 ---
 
-## ✨ Per què Gecko?
+### ✨ Característiques
 
-- **Natiu per a Windows**: interfície Win32 pura, suport Per-Monitor DPI v2 (`WM_DPICHANGED`) i captura accelerada per GPU (**DXGI Desktop Duplication**) amb *fallback* transparent a GDI per a monitors HDR, rotats o sessions RDP.
-- **Sense instal·lació per a l'usuari**: un únic `ClientRemot.exe` portable personalitzable amb el teu logotip i idioma (**Català**, **Español**, **English**). L'usuari només fa doble clic i tria **Permetre** o **Denegar**.
-- **Privacitat i seguretat reals**: connexions xifrades extrem a extrem amb certificats mutus (mTLS 1.3), credencials revocables per equip i consentiment explícit obligatori abans d'activar el control.
-- **Ràpid i nítid**: codificació híbrida per tessel·les guiada pels rectangles bruts de la GPU — text nítid sense pèrdua, moviment fluid i suport multimonitor complet.
-- **Fet per al suport del dia a dia**: portapapers bidireccional, enviament segur de fitxers amb barra de progrés i SHA-256, cerca d'equips i acció `Ctrl+Alt+Supr` integrats.
-- **100% autoallotjat i Open Source**: desplega el teu propi `RelayServidor.exe` i no depenguis de cap plataforma externa ni subscripció.
+| ⚡ Rendiment | 🛡️ Seguretat | 🪟 Windows Natiu |
+| :--- | :--- | :--- |
+| **GPU DXGI 60 FPS**<br/>Captura directa per maquinari | **Zero-Trust mTLS 1.3**<br/>Xifratge extrem a extrem | **Win32 Natiu Pur**<br/>Sense runtimes ni dependències |
+| **Tessel·les híbrides**<br/>Text nítid i moviment fluid | **Consentiment actiu**<br/>L'usuari autoritza el control | **DPI Awareness v2**<br/>Escalat nítid en qualsevol monitor |
+| **Multimonitor**<br/>Pantalla individual o combinada | **Revocació en un clic**<br/>Tall d'accés instantani | **Portapapers i fitxers**<br/>Eines essencials integrades |
 
 ---
 
-## 🔗 Com funciona
+### 🔗 Com funciona
 
-Ni els clients ni l'administrador han d'obrir ports al router ni al tallafocs: tothom es connecta de manera sortint al teu servidor pont.
+Sense obrir ports al router ni configurar tallafocs: tothom es connecta de manera sortint al servidor pont.
 
 ```mermaid
 flowchart LR
-    C["ClientRemot.exe<br/>Equip Windows"] --> R["RelayServidor.exe<br/>Servidor pont Windows"]
-    A["AdminRemoto.exe<br/>Consola i visor Win32"] --> R
+    subgraph Client ["💻 Equip Assistit"]
+        C["<b>ClientRemot.exe</b><br/>Sense instal·lació"]
+    end
+
+    subgraph Relay ["🌐 Servidor Pont"]
+        R["<b>RelayServidor.exe</b><br/>mTLS 1.3 · Port 9443"]
+    end
+
+    subgraph Admin ["🎛️ Administrador"]
+        A["<b>AdminRemoto.exe</b><br/>Consola i Visor Win32"]
+    end
+
+    C -- "mTLS sortint" --> R
+    A -- "mTLS sortint" --> R
+
+    classDef default fill:#18181b,stroke:#3f3f46,stroke-width:1px,color:#f4f4f5;
+    classDef client fill:#1e293b,stroke:#38bdf8,stroke-width:1.5px,color:#f8fafc;
+    classDef relay fill:#14532d,stroke:#22c55e,stroke-width:1.5px,color:#f0fdf4;
+    classDef admin fill:#312e81,stroke:#818cf8,stroke-width:1.5px,color:#eef2ff;
+
+    class C client;
+    class R relay;
+    class A admin;
 ```
 
 ---
 
-## 🚀 Inici ràpid
+### 🧩 Components
 
-1. **Compila els executables** (requereix Go 1.22+):
-   ```sh
-   go run ./cmd/build
-   ```
-2. **Arrenca `dist\RelayServidor.exe`** al teu servidor Windows (port TCP 9443).
-3. **Obre `dist\AdminRemoto.exe`**, enganxa la clau del servidor, genera `ClientRemot.exe` i ja pots donar suport remot.
-
-📘 Consulta la **[Guia tècnica i de producció](docs/PRODUCCIO.md)** per a la configuració avançada, seguretat, revocació de credencials, dreceres i resolució de problemes.
+| Binari | Rol | Descripció |
+| :--- | :--- | :--- |
+| 🎛️ **`AdminRemoto.exe`** | Administrador | Consola de control, visor fluid a 60 FPS i generador de clients. |
+| 🌐 **`RelayServidor.exe`** | Servidor | Servidor pont mTLS, gestor de credencials i auditoria de sessions. |
+| 💻 **`ClientRemot.exe`** | Client | Executable portable sense instal·lació. Doble clic i llest. |
 
 ---
 
-## 🤝 Open Source i comunitat
+### 🚀 Inici ràpid
 
-**Gecko** és un projecte de codi obert:
+```sh
+# 1. Compilar executables (Go 1.22+)
+go run ./cmd/build
 
-- **Vols contribuir?** Llegeix la guia a [CONTRIBUTING.md](CONTRIBUTING.md).
-- **Has trobat un problema de seguretat?** Revisa [SECURITY.md](SECURITY.md) per informar-ne de manera privada.
-- **Novetats per versió**: consulta [CHANGELOG.md](CHANGELOG.md).
+# 2. Iniciar el servidor pont (al servidor)
+dist\RelayServidor.exe
+
+# 3. Obrir la consola de control (a l'equip d'administració)
+dist\AdminRemoto.exe
+```
 
 ---
 
-## 📄 Llicència
+### 📚 Documentació
 
-Publicat sota la llicència **[MIT](LICENSE)**. Ets lliure d'utilitzar-lo, modificar-lo i distribuir-lo tant en projectes personals com comercials.
+| Recurs | Contingut |
+| :--- | :--- |
+| 📘 **[Guia de producció](docs/PRODUCCIO.md)** | Configuració de xarxa, desplegament, seguretat i dreceres. |
+| 🤝 **[Contribuir](CONTRIBUTING.md)** | Directrius de desenvolupament i estil de codi. |
+| 🛡️ **[Seguretat](SECURITY.md)** | Política de reporte responsable de vulnerabilitats. |
+| 📜 **[Llicència MIT](LICENSE)** | Codi obert per a ús personal i comercial. |
