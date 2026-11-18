@@ -1,4 +1,4 @@
-//go:build windows || linux || darwin
+//go:build windows
 
 package main
 
@@ -12,19 +12,18 @@ import (
 	"net"
 	"os"
 	"os/user"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"remote-control/internal/clientui"
 	"remote-control/internal/config"
 	"remote-control/internal/i18n"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
 	"remote-control/internal/transfer"
 	"remote-control/internal/version"
+	"remote-control/internal/win"
 )
 
 type clientAgent struct {
@@ -32,11 +31,9 @@ type clientAgent struct {
 	tlsCfg   *tls.Config
 	hostname string
 	username string
-	lang     i18n.Lang
 	strings  i18n.ClientStrings
-	sessionW string
-	window   clientWindow
-	injector inputInjector
+	window   *win.ClientWindow
+	injector *win.InputInjector
 	receiver *transfer.Receiver
 
 	mu           sync.Mutex
@@ -68,7 +65,7 @@ func main() {
 		return
 	}
 
-	platformInit()
+	win.EnableDPIAwareness()
 
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
@@ -95,16 +92,14 @@ func main() {
 		cfg:       cfg,
 		hostname:  hostname,
 		username:  currentUsername(),
-		lang:      lang,
 		strings:   str,
-		sessionW:  platformSessionWarning(lang),
-		injector:  newPlatformInjector(),
+		injector:  win.NewInputInjector(),
 		receiver:  transfer.NewReceiver(""),
 		ackWakeCh: make(chan struct{}, 1),
 	}
 	agent.quality.Store(78)
 
-	window := newPlatformWindow(hostname, cfg.LogoPNG, lang, clientui.Callbacks{
+	window := win.NewClientWindow(hostname, cfg.LogoPNG, lang, win.ClientCallbacks{
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
@@ -118,7 +113,7 @@ func main() {
 	if cfgErr != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(clientui.StateError, str.NoConfig)
+			window.SetState(win.UIStateError, str.NoConfig)
 		}()
 		_ = window.Run()
 		return
@@ -128,7 +123,7 @@ func main() {
 	if err != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(clientui.StateError, str.InvalidCert)
+			window.SetState(win.UIStateError, str.InvalidCert)
 		}()
 		_ = window.Run()
 		return
@@ -144,20 +139,13 @@ func main() {
 	cancel()
 }
 
-func (a *clientAgent) onlineStatusText() string {
-	if a.sessionW != "" {
-		return a.sessionW
-	}
-	return a.strings.Online
-}
-
 func (a *clientAgent) runLoop(ctx context.Context) {
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		a.window.SetState(clientui.StateConnecting, a.strings.Connecting)
+		a.window.SetState(win.UIStateConnecting, a.strings.Connecting)
 
 		err := a.connectAndServe(ctx)
 		a.cleanupAfterDisconnect()
@@ -167,10 +155,10 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		}
 		if err != nil {
 			if errors.Is(err, errAuthRejected) {
-				a.window.SetState(clientui.StateError, a.strings.AccessRejected)
+				a.window.SetState(win.UIStateError, a.strings.AccessRejected)
 				backoff = 5 * time.Second
 			} else {
-				a.window.SetState(clientui.StateConnecting, a.strings.Reconnecting)
+				a.window.SetState(win.UIStateConnecting, a.strings.Reconnecting)
 			}
 		}
 
@@ -218,16 +206,26 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	}()
 	defer close(doneConn)
 
-	protoMons := enumPlatformMonitors()
-	w, h := 1280, 720
+	winMons := win.EnumMonitors()
+	protoMons := make([]protocol.MonitorInfo, 0, len(winMons))
+	for _, m := range winMons {
+		protoMons = append(protoMons, protocol.MonitorInfo{
+			Index:   m.Index,
+			Width:   m.Width,
+			Height:  m.Height,
+			Primary: m.Primary,
+		})
+	}
+	w, h := 1920, 1080
 	if len(protoMons) > 0 {
 		w, h = protoMons[0].Width, protoMons[0].Height
 	}
+
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := protocol.WriteJSON(conn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    a.cfg.AuthToken,
 		Hostname: a.hostname,
-		OS:       runtime.GOOS,
+		OS:       "windows",
 		Username: a.username,
 		Version:  version.Version,
 		Width:    w,
@@ -254,13 +252,8 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	a.conn = conn
 	a.mu.Unlock()
 
-	if a.sessionW != "" {
-		a.window.SetState(clientui.StateOnline, a.sessionW)
-	} else {
-		a.window.SetState(clientui.StateOnline, a.strings.Online)
-	}
+	a.window.SetState(win.UIStateOnline, a.strings.Online)
 
-	// Start periodic heartbeat ping.
 	pingDone := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
@@ -281,7 +274,6 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	}()
 	defer close(pingDone)
 
-	// Main read loop.
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(35 * time.Second))
 		mType, data, err := protocol.ReadMessage(conn)
@@ -353,7 +345,7 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 					a.clipMu.Lock()
 					a.lastClipText = clip.Text
 					a.clipMu.Unlock()
-					_ = writePlatformClipboard(clip.Text)
+					_ = win.WriteClipboardText(clip.Text)
 				}
 			}
 
@@ -447,7 +439,7 @@ func (a *clientAgent) handleConsentRequest(req protocol.ConsentReqPayload) {
 	})
 	a.mu.Unlock()
 
-	a.window.SetState(clientui.StatePrompt, "")
+	a.window.SetState(win.UIStatePrompt, "")
 }
 
 func (a *clientAgent) expirePendingPrompt(sessionID string) {
@@ -468,7 +460,7 @@ func (a *clientAgent) expirePendingPrompt(sessionID string) {
 			Reason:    a.strings.TimeoutReason,
 		})
 	}
-	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
+	a.window.SetState(win.UIStateOnline, a.strings.Online)
 }
 
 func (a *clientAgent) onUserAllow() {
@@ -504,7 +496,7 @@ func (a *clientAgent) onUserAllow() {
 	}
 
 	a.injector.SetEnabled(true)
-	a.window.SetState(clientui.StateActive, "")
+	a.window.SetState(win.UIStateActive, "")
 	a.monitorIdx.Store(0)
 	a.forceKeyframe.Store(true)
 	go a.streamScreen(streamCtx, conn, sid)
@@ -533,12 +525,12 @@ func (a *clientAgent) onUserDeny() {
 			Reason:    a.strings.DeniedByUserReason,
 		})
 	}
-	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
+	a.window.SetState(win.UIStateOnline, a.strings.Online)
 }
 
 func (a *clientAgent) onUserDisconnect() {
 	a.stopAllSessions(a.strings.DisconnectedByUser)
-	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
+	a.window.SetState(win.UIStateOnline, a.strings.Online)
 }
 
 func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
@@ -567,7 +559,7 @@ func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
 		a.injector.SetEnabled(false)
 		a.receiver.AbortAll()
 		if connected {
-			a.window.SetState(clientui.StateOnline, a.onlineStatusText())
+			a.window.SetState(win.UIStateOnline, a.strings.Online)
 		}
 	}
 }
@@ -623,7 +615,7 @@ func (a *clientAgent) isSessionActive() bool {
 }
 
 func (a *clientAgent) syncClipboardLoop(ctx context.Context, conn net.Conn) {
-	initText := readPlatformClipboard()
+	initText := win.ReadClipboardText()
 	a.clipMu.Lock()
 	a.lastClipText = initText
 	a.clipMu.Unlock()
@@ -636,7 +628,7 @@ func (a *clientAgent) syncClipboardLoop(ctx context.Context, conn net.Conn) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cur := readPlatformClipboard()
+			cur := win.ReadClipboardText()
 			if cur == "" || len(cur) > protocol.MaxClipboardPayloadSize-64 {
 				continue
 			}
@@ -655,7 +647,7 @@ func (a *clientAgent) syncClipboardLoop(ctx context.Context, conn net.Conn) {
 }
 
 func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid string) {
-	capturer := newPlatformCapturer()
+	capturer := win.NewScreenCapturer()
 	defer capturer.Close()
 
 	a.lastSentFrameID.Store(0)
@@ -760,10 +752,8 @@ func currentUsername() string {
 		}
 		return name
 	}
-	for _, k := range []string{"USERNAME", "USER"} {
-		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-			return v
-		}
+	if v := strings.TrimSpace(os.Getenv("USERNAME")); v != "" {
+		return v
 	}
 	return ""
 }

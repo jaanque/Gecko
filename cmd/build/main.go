@@ -12,7 +12,6 @@ import (
 
 type buildTarget struct {
 	label   string
-	goos    string
 	goarch  string
 	ldflags string
 	output  string
@@ -20,19 +19,13 @@ type buildTarget struct {
 }
 
 func main() {
-	arch := flag.String("arch", "amd64", "Arquitectura destino para Windows/Linux (amd64 o arm64)")
-	macArch := flag.String("macos-arch", "arm64", "Arquitectura destino para macOS (arm64 o amd64)")
+	arch := flag.String("arch", "amd64", "Arquitectura destino de Windows (amd64 o arm64)")
 	ver := flag.String("version", "", "Versión a incrustar en los binarios (ej. 1.0.0)")
 	flag.Parse()
 
 	goarch := strings.TrimSpace(*arch)
 	if goarch != "amd64" && goarch != "arm64" {
 		fmt.Fprintf(os.Stderr, "Arquitectura no soportada: %q (usa amd64 o arm64)\n", goarch)
-		os.Exit(1)
-	}
-	darwinArch := strings.TrimSpace(*macArch)
-	if darwinArch != "amd64" && darwinArch != "arm64" {
-		fmt.Fprintf(os.Stderr, "Arquitectura macOS no soportada: %q (usa arm64 o amd64)\n", darwinArch)
 		os.Exit(1)
 	}
 
@@ -45,13 +38,7 @@ func main() {
 	}
 	verLD += fmt.Sprintf(" -X remote-control/internal/version.Date=%s", time.Now().UTC().Format("2006-01-02"))
 
-	dirs := []string{
-		filepath.Join("cmd", "admin", "assets"),
-		filepath.Join("dist", "windows"),
-		filepath.Join("dist", "linux"),
-		filepath.Join("dist", "macos"),
-	}
-	for _, dir := range dirs {
+	for _, dir := range []string{filepath.Join("cmd", "admin", "assets"), "dist"} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creando directorio %s: %v\n", dir, err)
 			os.Exit(1)
@@ -61,74 +48,23 @@ func main() {
 	targets := []buildTarget{
 		{
 			label:   "Cliente (Windows)",
-			goos:    "windows",
 			goarch:  goarch,
 			ldflags: "-H=windowsgui -s -w" + verLD,
 			output:  filepath.Join("cmd", "admin", "assets", "client_template.exe"),
 			pkg:     "./cmd/client",
 		},
 		{
-			label:   "Cliente (Linux)",
-			goos:    "linux",
-			goarch:  goarch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("cmd", "admin", "assets", "client_template_linux"),
-			pkg:     "./cmd/client",
-		},
-		{
-			label:   "Cliente (macOS)",
-			goos:    "darwin",
-			goarch:  darwinArch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("cmd", "admin", "assets", "client_template_darwin"),
-			pkg:     "./cmd/client",
-		},
-		{
 			label:   "Admin (Windows)",
-			goos:    "windows",
 			goarch:  goarch,
 			ldflags: "-H=windowsgui -s -w" + verLD,
-			output:  filepath.Join("dist", "windows", "AdminRemoto.exe"),
+			output:  filepath.Join("dist", "AdminRemoto.exe"),
 			pkg:     "./cmd/admin",
 		},
 		{
 			label:   "Relay (Windows)",
-			goos:    "windows",
 			goarch:  goarch,
 			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "windows", "RelayServidor.exe"),
-			pkg:     "./cmd/relay",
-		},
-		{
-			label:   "Admin (Linux)",
-			goos:    "linux",
-			goarch:  goarch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "linux", "AdminRemoto"),
-			pkg:     "./cmd/admin",
-		},
-		{
-			label:   "Relay (Linux)",
-			goos:    "linux",
-			goarch:  goarch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "linux", "RelayServidor"),
-			pkg:     "./cmd/relay",
-		},
-		{
-			label:   "Admin (macOS)",
-			goos:    "darwin",
-			goarch:  darwinArch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "macos", "AdminRemoto"),
-			pkg:     "./cmd/admin",
-		},
-		{
-			label:   "Relay (macOS)",
-			goos:    "darwin",
-			goarch:  darwinArch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "macos", "RelayServidor"),
+			output:  filepath.Join("dist", "RelayServidor.exe"),
 			pkg:     "./cmd/relay",
 		},
 	}
@@ -140,7 +76,7 @@ func main() {
 		cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+t.ldflags, "-o", t.output, t.pkg)
 		cmd.Env = append(os.Environ(),
 			"CGO_ENABLED=0",
-			"GOOS="+t.goos,
+			"GOOS=windows",
 			"GOARCH="+t.goarch,
 		)
 		cmd.Stdout = os.Stdout
@@ -151,7 +87,7 @@ func main() {
 		}
 	}
 
-	fmt.Println("Compilación completada en dist/{windows,linux,macos}/")
+	fmt.Println("Compilación completada en dist/")
 }
 
 func gitShortCommit() string {

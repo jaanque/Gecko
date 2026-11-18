@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   verify-and-build:
-    name: Vet, Test (Linux) & Cross-Build
+    name: Format, Vet & Cross-Build (Windows)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,13 +37,6 @@ jobs:
             exit 1
           fi
 
-      - name: Vet (Linux amd64)
-        env:
-          CGO_ENABLED: "0"
-          GOOS: linux
-          GOARCH: amd64
-        run: go vet ./...
-
       - name: Vet (Windows amd64)
         env:
           CGO_ENABLED: "0"
@@ -58,23 +51,21 @@ jobs:
           GOARCH: arm64
         run: go vet ./...
 
-      - name: Vet (macOS arm64)
-        env:
-          CGO_ENABLED: "0"
-          GOOS: darwin
-          GOARCH: arm64
-        run: go vet ./...
-
-      - name: Test (Linux)
+      - name: Test (Core packages)
         run: go test -race -count=1 ./...
 
-      - name: Cross-build all binaries
+      - name: Build Windows binaries (amd64)
         run: |
-          go run ./cmd/build
-          ls -lh dist/windows/ dist/linux/ dist/macos/
+          go run ./cmd/build -arch amd64
+          ls -lh dist/
+
+      - name: Build Windows binaries (arm64)
+        run: |
+          go run ./cmd/build -arch arm64
+          ls -lh dist/
 
   test-windows:
-    name: Test (Windows)
+    name: Test (Windows native)
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -91,13 +82,3 @@ jobs:
           CGO_ENABLED: "0"
           GOARCH: amd64
         run: go test -count=1 ./...
-
-  docker:
-    name: Build Relay Docker Image
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build image
-        run: docker build -t remote-relay:ci .

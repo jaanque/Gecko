@@ -3,17 +3,12 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"remote-control/internal/admin"
-	"remote-control/internal/adminweb"
-	"remote-control/internal/i18n"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
 	"remote-control/internal/version"
@@ -23,16 +18,14 @@ import (
 func main() {
 	showVersion := flag.Bool("version", false, "Mostrar versión y salir")
 	dataDir := flag.String("data-dir", "", "Carpeta donde guardar la configuración del servidor puente (por defecto: ./data junto al ejecutable)")
-	webMode := flag.Bool("web", false, "Usar interfaz web local en el navegador en lugar de la ventana Win32")
-	listenAddr := flag.String("listen", "127.0.0.1:0", "Dirección local para el modo -web")
-	langFlag := flag.String("lang", "", "Idioma inicial para el modo -web (ca, es, en)")
-	noBrowser := flag.Bool("no-browser", false, "No abrir el navegador automáticamente en modo -web")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version.Banner("AdminRemoto"))
 		return
 	}
+
+	win.EnableDPIAwareness()
 
 	resolvedDataDir := *dataDir
 	if resolvedDataDir == "" {
@@ -44,36 +37,8 @@ func main() {
 	}
 
 	relayClient := admin.NewRelayClient(resolvedDataDir)
-	winTemplate := embeddedClientTemplate()
-	linuxTemplate := embeddedLinuxClientTemplate()
-	darwinTemplate := embeddedDarwinClientTemplate()
-
-	if *webMode {
-		srv, err := adminweb.NewServer(relayClient, adminweb.Config{
-			ListenAddr: *listenAddr,
-			OpenURL:    !*noBrowser,
-			DefaultLng: i18n.Normalize(*langFlag, i18n.Detect(i18n.LangCA)),
-			Templates: adminweb.Templates{
-				Windows: winTemplate,
-				Linux:   linuxTemplate,
-				Darwin:  darwinTemplate,
-			},
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error iniciando Admin Web: %v\n", err)
-			os.Exit(1)
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		if err := srv.Run(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Admin Web detenido con error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	win.EnableDPIAwareness()
 	prof, hasProf := relayClient.Profile()
+	winTemplate := embeddedClientTemplate()
 
 	window := win.NewAdminWindow(win.AdminConfig{
 		HasProfile: hasProf,
@@ -115,15 +80,9 @@ func main() {
 		OnSendFile: func(path string) error {
 			return relayClient.SendFile(path)
 		},
-		OnGenerateClient: func(platform string, logoPNG []byte, destPath string) error {
-			tmpl := winTemplate
-			if platform == "linux" {
-				tmpl = linuxTemplate
-			} else if platform == "darwin" {
-				tmpl = darwinTemplate
-			}
+		OnGenerateClient: func(logoPNG []byte, lang string, destPath string) error {
 			label := filepath.Base(destPath)
-			built, _, err := relayClient.GenerateClientBinaryWithLabel(tmpl, logoPNG, label)
+			built, _, err := relayClient.GenerateClientBinaryWithOptions(winTemplate, logoPNG, label, lang)
 			if err != nil {
 				return err
 			}
@@ -148,7 +107,6 @@ func main() {
 					ID:           c.ID,
 					CredentialID: c.CredentialID,
 					Hostname:     c.Hostname,
-					OS:           c.OS,
 					Username:     c.Username,
 					Version:      c.Version,
 					IP:           c.IP,
