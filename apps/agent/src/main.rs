@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let tray = tray::spawn_tray_icon(
-        format!("RMM Agente — Conectando a {}...", config.data.admin_name),
+        format!("Gecko — Conectando a {}...", config.data.admin_name),
         shutdown.clone(),
     );
 
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
         }
 
         tray.update_status(&format!(
-            "RMM Agente — Reconectando a {}...",
+            "Gecko — Reconectando a {}...",
             config.data.admin_name
         ));
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
@@ -130,7 +130,7 @@ async fn connect_and_serve(
         .ok_or_else(|| anyhow!("No IP resolved for {target_addr}"))?;
 
     info!(%resolved, "Initiating reverse QUIC connection (Phone Home)");
-    let conn = endpoint.connect(resolved, "rmm-admin.local")?.await?;
+    let conn = endpoint.connect(resolved, "gecko-admin.local")?.await?;
     info!(%resolved, "QUIC TLS 1.3 tunnel established with pinned certificate");
 
     // Open bidirectional Control Stream #0
@@ -166,7 +166,7 @@ async fn connect_and_serve(
         } => {
             info!("Registered as Online in Admin Dashboard");
             tray.update_status(&format!(
-                "RMM Agente — Online ({})",
+                "Gecko — Online ({})",
                 config.data.admin_name
             ));
         }
@@ -278,7 +278,7 @@ async fn connect_and_serve(
                         });
 
                         tray.update_status(&format!(
-                            "RMM Agente — SESION REMOTA ACTIVA ({})",
+                            "Gecko — SESION REMOTA ACTIVA ({})",
                             config.data.admin_name
                         ));
 
@@ -300,7 +300,7 @@ async fn connect_and_serve(
                         }
                         injector.lock().release_all();
                         tray.update_status(&format!(
-                            "RMM Agente — Online ({})",
+                            "Gecko — Online ({})",
                             config.data.admin_name
                         ));
                     }

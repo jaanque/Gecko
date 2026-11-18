@@ -57,10 +57,10 @@ impl AdminIdentity {
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
 
-        let mut params = CertificateParams::new(vec!["rmm-admin.local".to_string()])?;
+        let mut params = CertificateParams::new(vec!["gecko-admin.local".to_string()])?;
         params
             .distinguished_name
-            .push(DnType::CommonName, "RMM Zero-Config Admin");
+            .push(DnType::CommonName, "Gecko Admin");
         let key_pair = KeyPair::generate()?;
         let cert = params.self_signed(&key_pair)?;
         let cert_der = cert.der().to_vec();

@@ -28,7 +28,7 @@ export const GenerateClientModal: React.FC<Props> = ({
   const [adminName, setAdminName] = useState("Soporte IT");
   const [endpointsText, setEndpointsText] = useState(defaultEndpoint);
   const [ttlHours, setTtlHours] = useState<number>(24);
-  const [fileName, setFileName] = useState("ZeroRMM-Soporte.exe");
+  const [fileName, setFileName] = useState("Gecko-Soporte.exe");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GenerateClientResponse | null>(null);
@@ -166,7 +166,7 @@ export const GenerateClientModal: React.FC<Props> = ({
                       const clean = e.target.value
                         .replace(/[^a-zA-Z0-9-_]+/g, "-")
                         .replace(/^-|-$/g, "");
-                      setFileName(`ZeroRMM-${clean || "Client"}.exe`);
+                      setFileName(`Gecko-${clean || "Client"}.exe`);
                     }}
                     placeholder="Ej: ACME - Contabilidad"
                     className="w-full rounded-lg border border-zinc-800 bg-[#090b10] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500/60 focus:outline-none"

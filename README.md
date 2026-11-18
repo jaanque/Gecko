@@ -1,4 +1,4 @@
-# ZeroRMM — Sistema de Control Remoto de Conexión Inversa y Baja Latencia
+# Gecko — Sistema de Control Remoto de Conexión Inversa y Baja Latencia
 
 Sistema RMM de alto rendimiento basado en **Arquitectura de Conexión Inversa (Reverse Connection)**, **Captura GPU Zero-Copy**, **Codificación por Hardware (NVENC / AMF / QuickSync)** y **Transporte QUIC por Datagramas (RFC 9221)** con experiencia **Zero-Config** para el cliente final.
 

@@ -1,4 +1,4 @@
-# Guía de Despliegue, Arranque y Uso — ZeroRMM
+# Guía de Despliegue, Arranque y Uso — Gecko
 
 Esta guía explica paso a paso cómo preparar el entorno, levantar la **Aplicación Admin**, generar y ejecutar el **Agente Cliente (Zero-Config)**, probar en local/LAN/Internet, compilar para producción y resolver problemas comunes.
 
@@ -51,14 +51,14 @@ npx.cmd tauri dev
 
 Al arrancar verás:
 1. Se levanta Vite en `http://localhost:5173`.
-2. Se compila y abre la ventana de escritorio **ZeroRMM**.
+2. Se compila y abre la ventana de escritorio **Gecko**.
 3. El **servidor QUIC embebido** queda escuchando automáticamente en **`UDP 0.0.0.0:4433`** (visible en la esquina inferior izquierda del panel como `Backend Embebido · UDP :4433`).
 
 #### Variables de entorno opcionales al arrancar el Admin
 
 ```powershell
 # Cambiar el puerto UDP de escucha (por defecto: 4433)
-$env:ZERORMM_PORT = "4433"
+$env:GECKO_PORT = "4433"
 
 # Ver logs detallados de red y sesiones en la consola
 $env:RUST_LOG = "rmm_admin=debug,rmm_net=debug"
@@ -79,7 +79,7 @@ npx.cmd tauri dev
    - **Endpoints:** `127.0.0.1:4433` (puedes hacer clic en la píldora `+ 127.0.0.1:4433` debajo del campo).
    - **Caducidad:** `24 horas` (o la que prefieras).
 3. Pulsa **"Generar .EXE"** → en menos de 100 ms inyecta el overlay firmado Ed25519 al final del stub sin recompilar.
-4. Pulsa **"Abrir en Explorador"** y haz **doble clic** sobre el ejecutable generado (ej. `ZeroRMM-Prueba-Local.exe`).
+4. Pulsa **"Abrir en Explorador"** y haz **doble clic** sobre el ejecutable generado (ej. `Gecko-Prueba-Local.exe`).
 5. **Resultado inmediato:**
    - Aparece un icono del agente en la bandeja del sistema de Windows (junto al reloj).
    - En la Aplicación Admin, tu equipo aparece instantáneamente como **`Online`** mostrando nombre del PC, usuario de Windows, GPU y monitores.
@@ -93,7 +93,7 @@ npx.cmd tauri dev
 
 1. **En la máquina del Administrador**, abre el puerto **UDP 4433** en el Firewall de Windows (ejecuta PowerShell como Administrador una sola vez):
    ```powershell
-   New-NetFirewallRule -DisplayName "ZeroRMM Admin QUIC (UDP 4433)" -Direction Inbound -Protocol UDP -LocalPort 4433 -Action Allow
+   New-NetFirewallRule -DisplayName "Gecko Admin QUIC (UDP 4433)" -Direction Inbound -Protocol UDP -LocalPort 4433 -Action Allow
    ```
 2. En el Panel Admin, pulsa **"Generar Cliente"**. El campo **Endpoints** ya sugerirá automáticamente tu IP de red local (por ejemplo `192.168.1.50:4433`).
 3. Genera el `.exe`, envíalo al segundo PC Windows y haz **doble clic** en ese equipo (no requiere abrir puertos ni configurar firewall en el equipo cliente).
@@ -155,7 +155,7 @@ Este script ejecuta automáticamente:
 Al iniciarse por primera vez, la Aplicación Admin crea y persiste su estado local en:
 
 ```text
-%LOCALAPPDATA%\zerormm\admin\data\
+%LOCALAPPDATA%\gecko\admin\data\
 ├── admin_identity.json     # Par de claves Ed25519 y certificado TLS 1.3 (mantiene el pinning entre reinicios)
 ├── issued_tokens.json      # Registro de ejecutables generados y estado de revocación
 └── generated-clients\      # Carpeta donde se guardan los .exe personalizados generados

@@ -173,7 +173,7 @@ mod tests {
             }
         });
 
-        let conn = client.connect(server_addr, "rmm-admin.local").unwrap().await.unwrap();
+        let conn = client.connect(server_addr, "gecko-admin.local").unwrap().await.unwrap();
         let (mut send, mut recv) = conn.open_bi().await.unwrap();
         write_framed(&mut send, &AdminControlMsg::RequestIdr).await.unwrap();
         let reply: AdminControlMsg = read_framed(&mut recv).await.unwrap();
@@ -210,7 +210,7 @@ mod tests {
             }
         });
 
-        let res = client.connect(server_addr, "rmm-admin.local").unwrap().await;
+        let res = client.connect(server_addr, "gecko-admin.local").unwrap().await;
         assert!(res.is_err(), "Client must reject server with unpinned certificate");
         srv_handle.abort();
     }

@@ -156,7 +156,7 @@ pub fn generate_configured_client(
     };
 
     let admin_name = if req.admin_name.trim().is_empty() {
-        "ZeroRMM Admin".to_string()
+        "Gecko Admin".to_string()
     } else {
         req.admin_name.trim().to_string()
     };
@@ -179,7 +179,7 @@ pub fn generate_configured_client(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(sanitize_filename)
-        .unwrap_or_else(|| format!("ZeroRMM-{}.exe", sanitize_filename(&label)));
+        .unwrap_or_else(|| format!("Gecko-{}.exe", sanitize_filename(&label)));
 
     let final_name = if sanitized_name.to_lowercase().ends_with(".exe") {
         sanitized_name

@@ -20,25 +20,25 @@ pub fn run() {
         )
         .init();
 
-    let data_dir = ProjectDirs::from("com", "zerormm", "admin")
+    let data_dir = ProjectDirs::from("com", "gecko", "admin")
         .map(|d| d.data_local_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir().join("zerormm-admin"));
+        .unwrap_or_else(|| std::env::temp_dir().join("gecko-admin"));
 
-    let port = std::env::var("ZERORMM_PORT")
+    let port = std::env::var("GECKO_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_QUIC_PORT);
 
     let admin_state = Arc::new(
         AdminState::initialize(data_dir.clone(), port)
-            .expect("Failed to initialize ZeroRMM Admin cryptographic identity"),
+            .expect("Failed to initialize Gecko Admin cryptographic identity"),
     );
 
     info!(
         data_dir = %data_dir.display(),
         port,
         cert_fp = %admin_state.identity.cert_fingerprint_hex(),
-        "ZeroRMM Admin initialized"
+        "Gecko Admin initialized"
     );
 
     let server_state = admin_state.clone();
@@ -69,5 +69,5 @@ pub fn run() {
             commands::disconnect_agent,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running ZeroRMM Admin application");
+        .expect("error while running Gecko Admin application");
 }

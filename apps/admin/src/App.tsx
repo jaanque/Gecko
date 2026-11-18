@@ -112,12 +112,12 @@ export default function App() {
         {/* Brand */}
         <div className="flex items-center gap-3 px-5 py-5 border-b border-zinc-800/60">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-linear-to-br from-emerald-400 to-teal-600 text-zinc-950 font-black shadow-lg shadow-emerald-500/20">
-            Z
+            G
           </div>
           <div>
             <div className="flex items-center gap-1.5">
               <h1 className="text-sm font-bold tracking-tight text-zinc-100">
-                ZeroRMM
+                Gecko
               </h1>
               <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-400">
                 QUIC

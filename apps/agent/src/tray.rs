@@ -93,7 +93,7 @@ fn run_tray_loop(
 ) -> anyhow::Result<()> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
-        let class_name = w!("RmmAgentTrayWindow");
+        let class_name = w!("GeckoAgentTrayWindow");
 
         let wc = WNDCLASSW {
             lpfnWndProc: Some(tray_wnd_proc),
@@ -106,7 +106,7 @@ fn run_tray_loop(
         let hwnd = CreateWindowExW(
             Default::default(),
             class_name,
-            w!("RMM Remote Agent"),
+            w!("Gecko Remote Agent"),
             Default::default(),
             0,
             0,
@@ -161,7 +161,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         menu,
                         MF_STRING,
                         0,
-                        PCWSTR(to_wide("RMM Agente Remoto (Activo)").as_ptr()),
+                        PCWSTR(to_wide("Gecko Agente (Activo)").as_ptr()),
                     );
                     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
                     let _ = AppendMenuW(
