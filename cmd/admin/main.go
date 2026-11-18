@@ -80,8 +80,11 @@ func main() {
 		OnQuality: func(quality int) {
 			hub.SendStreamConfig(quality, true)
 		},
-		OnGenerateClient: func(serverAddr, destPath string) error {
-			built, err := hub.GenerateClientBinary(template, serverAddr)
+		OnSelectMonitor: func(monitorIndex int) {
+			hub.SendSelectMonitor(monitorIndex)
+		},
+		OnGenerateClient: func(serverAddr string, logoPNG []byte, destPath string) error {
+			built, err := hub.GenerateClientBinary(template, serverAddr, logoPNG)
 			if err != nil {
 				return err
 			}
@@ -98,12 +101,13 @@ func main() {
 			rows := make([]win.AdminClientRow, 0, len(clients))
 			for _, c := range clients {
 				rows = append(rows, win.AdminClientRow{
-					ID:       c.ID,
-					Hostname: c.Hostname,
-					IP:       c.IP,
-					Width:    c.Width,
-					Height:   c.Height,
-					Status:   c.Status,
+					ID:           c.ID,
+					Hostname:     c.Hostname,
+					IP:           c.IP,
+					Width:        c.Width,
+					Height:       c.Height,
+					MonitorCount: c.MonitorCount,
+					Status:       c.Status,
 				})
 			}
 			window.UpdateClients(rows)
@@ -111,8 +115,8 @@ func main() {
 		OnSessionPending: func(_, _, hostname string) {
 			window.SetPending(hostname)
 		},
-		OnSessionStarted: func(sessionID, _, hostname string, w, h int) {
-			window.OpenSession(sessionID, hostname, w, h)
+		OnSessionStarted: func(sessionID, _, hostname string, w, h, monCount int) {
+			window.OpenSession(sessionID, hostname, w, h, monCount)
 		},
 		OnSessionDenied: func(_, _, hostname, reason string) {
 			window.NotifyDenied(hostname, reason)

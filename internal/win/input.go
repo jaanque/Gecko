@@ -53,12 +53,13 @@ func NewInputInjector() *InputInjector {
 	}
 }
 
-// HandleMouse injects a normalized mouse event across the virtual desktop.
-func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent) {
+// HandleMouse injects a normalized mouse event mapped to the active monitor (0 = Monitor 1, -1 = all monitors).
+func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent, monitorIndex int) {
+	dx, dy := mapNormalizedToVirtualDesk(ev.X, ev.Y, monitorIndex)
 	pkt := mouseInputPacket{
 		Type: inputMouse,
-		DX:   int32(ev.X),
-		DY:   int32(ev.Y),
+		DX:   dx,
+		DY:   dy,
 	}
 
 	switch ev.Action {
@@ -79,6 +80,34 @@ func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent) {
 	}
 
 	procSendInput.Call(1, uintptr(unsafe.Pointer(&pkt)), unsafe.Sizeof(pkt))
+}
+
+func mapNormalizedToVirtualDesk(normX, normY uint16, monitorIndex int) (int32, int32) {
+	if monitorIndex < 0 {
+		return int32(normX), int32(normY)
+	}
+	reg := ResolveMonitorBounds(monitorIndex)
+	virt := VirtualDesktopBounds()
+	if virt.Width <= 1 || virt.Height <= 1 || reg.Width <= 1 || reg.Height <= 1 {
+		return int32(normX), int32(normY)
+	}
+
+	px := float64(reg.X) + (float64(normX)/65535.0)*float64(reg.Width-1)
+	py := float64(reg.Y) + (float64(normY)/65535.0)*float64(reg.Height-1)
+
+	vx := ((px - float64(virt.X)) / float64(virt.Width-1)) * 65535.0
+	vy := ((py - float64(virt.Y)) / float64(virt.Height-1)) * 65535.0
+	if vx < 0 {
+		vx = 0
+	} else if vx > 65535 {
+		vx = 65535
+	}
+	if vy < 0 {
+		vy = 0
+	} else if vy > 65535 {
+		vy = 65535
+	}
+	return int32(vx + 0.5), int32(vy + 0.5)
 }
 
 // HandleKey injects a keyboard event (either virtual key or Unicode code unit).

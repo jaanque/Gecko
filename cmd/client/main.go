@@ -36,6 +36,7 @@ type clientAgent struct {
 	streamCancel context.CancelFunc
 
 	quality       atomic.Int32
+	monitorIdx    atomic.Int32 // 0 = Monitor 1 (default), 1..N-1 = other monitors, -1 = all monitors
 	forceKeyframe atomic.Bool
 }
 
@@ -72,7 +73,7 @@ func main() {
 	}
 	agent.quality.Store(65)
 
-	window := win.NewClientWindow(hostname, win.ClientCallbacks{
+	window := win.NewClientWindow(hostname, cfg.LogoPNG, win.ClientCallbacks{
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
@@ -167,7 +168,17 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	}()
 	defer close(doneConn)
 
-	w, h := win.ScreenSize()
+	winMons := win.EnumMonitors()
+	protoMons := make([]protocol.MonitorInfo, 0, len(winMons))
+	for _, m := range winMons {
+		protoMons = append(protoMons, protocol.MonitorInfo{
+			Index:   m.Index,
+			Width:   m.Width,
+			Height:  m.Height,
+			Primary: m.Primary,
+		})
+	}
+	w, h := winMons[0].Width, winMons[0].Height
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := protocol.WriteJSON(conn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    a.cfg.AuthToken,
@@ -175,6 +186,7 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		OS:       "windows",
 		Width:    w,
 		Height:   h,
+		Monitors: protoMons,
 	}); err != nil {
 		return err
 	}
@@ -252,6 +264,10 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 				if sc.Quality >= 30 && sc.Quality <= 95 {
 					a.quality.Store(int32(sc.Quality))
 				}
+				if sc.Monitor != nil {
+					a.monitorIdx.Store(int32(*sc.Monitor))
+					a.forceKeyframe.Store(true)
+				}
 				if sc.Keyframe {
 					a.forceKeyframe.Store(true)
 				}
@@ -260,7 +276,7 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		case protocol.MsgMouse:
 			if a.isSessionActive() {
 				if ev, err := protocol.DecodeMouse(data); err == nil {
-					a.injector.HandleMouse(ev)
+					a.injector.HandleMouse(ev, int(a.monitorIdx.Load()))
 				}
 			}
 
@@ -357,6 +373,7 @@ func (a *clientAgent) onUserAllow() {
 	}
 
 	a.window.SetState(win.UIStateActive, "")
+	a.monitorIdx.Store(0) // Always start on Monitor 1
 	a.forceKeyframe.Store(true)
 	go a.streamScreen(streamCtx, conn, sid)
 }
@@ -488,9 +505,10 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 		start := time.Now()
 
 		q := int(a.quality.Load())
+		monIdx := int(a.monitorIdx.Load())
 		force := a.forceKeyframe.Swap(false)
 
-		frame, _, _, err := capturer.CaptureFrame(q, force)
+		frame, _, _, err := capturer.CaptureFrame(monIdx, q, force)
 		if err != nil {
 			// E.g. temporary UAC/lock screen; wait briefly and retry.
 			select {

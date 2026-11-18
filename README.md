@@ -7,12 +7,12 @@ Aplicación de escritorio nativa para Windows, ligera, directa y segura para con
 1. **Aplicación de Administración (`AdminRemoto.exe`)**:
    - Aplicación de escritorio nativa de Windows (sin navegador ni ventana de consola).
    - Muestra en tiempo real la lista de **equipos en línea**.
-   - Incluye el botón **Generar cliente (.exe)** para elegir la IP del servidor y guardar **`ClienteRemoto.exe`** directamente en disco (el mismo ejecutable sirve para todos los equipos).
-   - Al pulsar un equipo disponible, solicita permiso al usuario y, si acepta, abre una ventana nativa de control remoto con ratón, teclado, selector de calidad y pantalla completa (`F11`).
+   - Incluye el botón **Generar cliente (.exe)** para elegir la IP del servidor, añadir opcionalmente un **logo personalizado (PNG/JPG)** para el cliente y guardar **`ClienteRemoto.exe`** directamente en disco (el mismo ejecutable sirve para todos los equipos).
+   - Al pulsar un equipo disponible, solicita permiso al usuario y, si acepta, abre una ventana nativa mostrando por defecto el **Monitor 1**; si el equipo tiene más monitores, aparece el selector **`M1 / M2 / ... / Todos`** en la barra superior para saltar entre monitores o verlos todos a la vez, junto con calidad y pantalla completa (`F11`).
 
 2. **Aplicación Cliente (`ClienteRemoto.exe`)**:
    - Ejecutable nativo de Windows (sin ventana de consola, sin instalar nada).
-   - Muestra únicamente el **nombre del equipo** y su estado de conexión.
+   - Muestra únicamente el **logo** (si el admin añadió uno), el **nombre del equipo** y su estado de conexión (el logo también se aplica como icono de la ventana y barra de tareas).
    - Cuando el administrador solicita acceso, aparecen solo dos botones: **Permitir** y **Denegar**.
    - Durante una sesión activa muestra un aviso visible con el botón **Desconectar** para cortar el acceso en cualquier momento.
 

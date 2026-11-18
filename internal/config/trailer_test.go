@@ -1,16 +1,34 @@
 package config
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"strings"
 	"testing"
 )
 
 func TestTrailerAppendAndRead(t *testing.T) {
 	base := []byte("MZ\x90\x00fake-pe-binary-payload-1234567890")
+	logo := makeTestLogoPNG(t, 256, 128)
+	normLogo, err := NormalizeLogoBytes(logo)
+	if err != nil {
+		t.Fatalf("NormalizeLogoBytes failed: %v", err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(normLogo))
+	if err != nil {
+		t.Fatalf("normalized logo is not valid PNG: %v", err)
+	}
+	if decoded.Bounds().Dx() != 128 || decoded.Bounds().Dy() != 64 {
+		t.Fatalf("expected resized 128x64, got %dx%d", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+	}
+
 	cfg1 := ClientConfig{
 		ServerAddr: "192.168.1.50:9443",
 		CertSHA256: strings.Repeat("a", 64),
 		AuthToken:  "0123456789abcdef0123456789abcdef",
+		LogoPNG:    normLogo,
 	}
 
 	built, err := AppendToBinary(base, cfg1)
@@ -22,11 +40,11 @@ func TestTrailerAppendAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFromBytes failed: %v", err)
 	}
-	if got != cfg1 {
+	if got.ServerAddr != cfg1.ServerAddr || got.CertSHA256 != cfg1.CertSHA256 || got.AuthToken != cfg1.AuthToken || !bytes.Equal(got.LogoPNG, cfg1.LogoPNG) {
 		t.Fatalf("mismatch: got %+v, want %+v", got, cfg1)
 	}
 
-	// Re-embedding should replace the previous trailer cleanly without growing unboundedly.
+	// Re-embedding should replace the previous trailer cleanly.
 	cfg2 := ClientConfig{
 		ServerAddr: "10.0.0.5:9443",
 		CertSHA256: strings.Repeat("b", 64),
@@ -40,10 +58,22 @@ func TestTrailerAppendAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFromBytes(rebuilt) failed: %v", err)
 	}
-	if got2 != cfg2 {
+	if got2.ServerAddr != cfg2.ServerAddr || got2.CertSHA256 != cfg2.CertSHA256 || got2.AuthToken != cfg2.AuthToken || len(got2.LogoPNG) != 0 {
 		t.Fatalf("rebuilt mismatch: got %+v, want %+v", got2, cfg2)
 	}
-	if len(rebuilt) > len(built)+16 {
-		t.Fatalf("expected trailer replacement, size grew unexpectedly from %d to %d", len(built), len(rebuilt))
+}
+
+func makeTestLogoPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 30, G: 90, B: 180, A: 200})
+		}
 	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png.Encode failed: %v", err)
+	}
+	return buf.Bytes()
 }

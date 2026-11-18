@@ -14,16 +14,17 @@ import (
 const (
 	trailerMagic   = "RMTCONF1"
 	trailerFooter  = 16 // 4 bytes length + 4 bytes crc32 + 8 bytes magic
-	maxConfigBytes = 64 * 1024
+	maxConfigBytes = 512 * 1024
 )
 
 var ErrNoEmbeddedConfig = errors.New("no embedded client config found")
 
-// ClientConfig holds the connection and security parameters embedded into ClienteRemoto.exe.
+// ClientConfig holds the connection, security, and optional branding parameters embedded into ClienteRemoto.exe.
 type ClientConfig struct {
 	ServerAddr string `json:"server_addr"`
 	CertSHA256 string `json:"cert_sha256"`
 	AuthToken  string `json:"auth_token"`
+	LogoPNG    []byte `json:"logo_png,omitempty"`
 }
 
 // Validate checks that all required fields are present.

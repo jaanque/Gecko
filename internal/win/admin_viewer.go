@@ -114,14 +114,17 @@ const (
 	vbtnQualHi  = 3
 	vbtnFull    = 4
 	vbtnDisc    = 5
+	vbtnMonAll  = 100
+	vbtnMonBase = 200 // 200 + monitorIndex (0, 1, 2, ...)
 )
 
 // ViewerCallbacks wires the native remote desktop viewer back to the Hub.
 type ViewerCallbacks struct {
-	OnMouse      func(ev protocol.MouseEvent)
-	OnKey        func(ev protocol.KeyEvent)
-	OnQuality    func(quality int)
-	OnDisconnect func()
+	OnMouse         func(ev protocol.MouseEvent)
+	OnKey           func(ev protocol.KeyEvent)
+	OnQuality       func(quality int)
+	OnSelectMonitor func(monitorIndex int)
+	OnDisconnect    func()
 }
 
 type remoteViewer struct {
@@ -132,14 +135,16 @@ type remoteViewer struct {
 	cursorArr uintptr
 	cursorHnd uintptr
 
-	mu        sync.Mutex
-	hwnd      uintptr
-	sessionID string
-	hostname  string
-	remoteW   int
-	remoteH   int
-	quality   int
-	dpi       int32
+	mu            sync.Mutex
+	hwnd          uintptr
+	sessionID     string
+	hostname      string
+	remoteW       int
+	remoteH       int
+	monitorCount  int
+	activeMonitor int // 0 = Monitor 1 (default), 1..N-1 = other, -1 = all monitors
+	quality       int
+	dpi           int32
 
 	fpsCount int
 	fpsTick  time.Time
@@ -197,14 +202,20 @@ func newRemoteViewer(hInst uintptr, cb ViewerCallbacks) *remoteViewer {
 }
 
 // Open must be called on the Win32 UI thread.
-func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH int) {
+func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monitorCount int) {
 	v.CloseUI()
+
+	if monitorCount < 1 {
+		monitorCount = 1
+	}
 
 	v.mu.Lock()
 	v.sessionID = sessionID
 	v.hostname = hostname
 	v.remoteW = remoteW
 	v.remoteH = remoteH
+	v.monitorCount = monitorCount
+	v.activeMonitor = 0 // Always start on Monitor 1
 	v.quality = 65
 	v.fps = 0
 	v.fpsCount = 0
@@ -391,12 +402,13 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	btnH := v.scale(28)
 	btnY := (barH - btnH) / 2
 	gap := v.scale(8)
+	smallGap := v.scale(4)
 
-	discW := v.scale(102)
-	fullW := v.scale(130)
-	qHiW := v.scale(46)
-	qMedW := v.scale(74)
-	qLowW := v.scale(48)
+	discW := v.scale(96)
+	fullW := v.scale(124)
+	qHiW := v.scale(44)
+	qMedW := v.scale(70)
+	qLowW := v.scale(46)
 
 	x := width - pad
 
@@ -408,21 +420,56 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 		fullLabel = "Salir pantalla"
 	}
 	rcFull := rect{x - fullW, btnY, x, btnY + btnH}
-	x = rcFull.Left - v.scale(14)
+	x = rcFull.Left - v.scale(12)
 
 	rcHi := rect{x - qHiW, btnY, x, btnY + btnH}
-	x = rcHi.Left - v.scale(4)
+	x = rcHi.Left - smallGap
 	rcMed := rect{x - qMedW, btnY, x, btnY + btnH}
-	x = rcMed.Left - v.scale(4)
+	x = rcMed.Left - smallGap
 	rcLow := rect{x - qLowW, btnY, x, btnY + btnH}
+	x = rcLow.Left
 
-	v.toolbarBtns = []viewerToolbarBtn{
-		{id: vbtnQualLow, label: "Baja", rc: rcLow},
-		{id: vbtnQualMed, label: "Estándar", rc: rcMed},
-		{id: vbtnQualHi, label: "Alta", rc: rcHi},
-		{id: vbtnFull, label: fullLabel, rc: rcFull},
-		{id: vbtnDisc, label: "Desconectar", rc: rcDisc},
+	btns := make([]viewerToolbarBtn, 0, 12)
+
+	// If remote PC has multiple monitors, add [M1] [M2] ... [Todos] selector to the left of quality controls.
+	v.mu.Lock()
+	monCount := v.monitorCount
+	v.mu.Unlock()
+	if monCount > 1 {
+		if monCount > 6 {
+			monCount = 6
+		}
+		x -= v.scale(14)
+		allW := v.scale(56)
+		rcAll := rect{x - allW, btnY, x, btnY + btnH}
+		x = rcAll.Left - smallGap
+
+		monBtns := make([]viewerToolbarBtn, 0, monCount+1)
+		monW := v.scale(38)
+		for i := monCount - 1; i >= 0; i-- {
+			rcM := rect{x - monW, btnY, x, btnY + btnH}
+			monBtns = append(monBtns, viewerToolbarBtn{
+				id:    vbtnMonBase + i,
+				label: fmt.Sprintf("M%d", i+1),
+				rc:    rcM,
+			})
+			x = rcM.Left - smallGap
+		}
+		// Reverse so M1 is leftmost (used for leftLimit calculation).
+		for i := len(monBtns) - 1; i >= 0; i-- {
+			btns = append(btns, monBtns[i])
+		}
+		btns = append(btns, viewerToolbarBtn{id: vbtnMonAll, label: "Todos", rc: rcAll})
 	}
+
+	btns = append(btns,
+		viewerToolbarBtn{id: vbtnQualLow, label: "Baja", rc: rcLow},
+		viewerToolbarBtn{id: vbtnQualMed, label: "Estándar", rc: rcMed},
+		viewerToolbarBtn{id: vbtnQualHi, label: "Alta", rc: rcHi},
+		viewerToolbarBtn{id: vbtnFull, label: fullLabel, rc: rcFull},
+		viewerToolbarBtn{id: vbtnDisc, label: "Desconectar", rc: rcDisc},
+	)
+	v.toolbarBtns = btns
 	return barH
 }
 
@@ -464,6 +511,7 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 	rw, rh := v.remoteW, v.remoteH
 	fps := v.fps
 	qual := v.quality
+	activeMon := v.activeMonitor
 	v.mu.Unlock()
 
 	procSetBkMode.Call(memDC, transparentBk)
@@ -496,7 +544,9 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 		hovered := v.hoverBtn == b.id
 		active := (b.id == vbtnQualLow && qual == 45) ||
 			(b.id == vbtnQualMed && qual == 65) ||
-			(b.id == vbtnQualHi && qual == 85)
+			(b.id == vbtnQualHi && qual == 85) ||
+			(b.id == vbtnMonAll && activeMon == -1) ||
+			(b.id >= vbtnMonBase && activeMon == b.id-vbtnMonBase)
 
 		bg := rgb(255, 255, 255)
 		border := rgb(212, 212, 216)
@@ -715,21 +765,40 @@ func (v *remoteViewer) releaseAllHeldKeys() {
 }
 
 func (v *remoteViewer) handleToolbarClick(hwnd uintptr, btnID int) {
-	switch btnID {
-	case vbtnQualLow:
+	switch {
+	case btnID == vbtnQualLow:
 		v.setQuality(hwnd, 45)
-	case vbtnQualMed:
+	case btnID == vbtnQualMed:
 		v.setQuality(hwnd, 65)
-	case vbtnQualHi:
+	case btnID == vbtnQualHi:
 		v.setQuality(hwnd, 85)
-	case vbtnFull:
+	case btnID == vbtnMonAll:
+		v.selectMonitor(hwnd, -1)
+	case btnID >= vbtnMonBase:
+		v.selectMonitor(hwnd, btnID-vbtnMonBase)
+	case btnID == vbtnFull:
 		v.toggleFullscreen(hwnd)
-	case vbtnDisc:
+	case btnID == vbtnDisc:
 		if v.cb.OnDisconnect != nil {
 			go v.cb.OnDisconnect()
 		}
 		v.CloseUI()
 	}
+}
+
+func (v *remoteViewer) selectMonitor(hwnd uintptr, monitorIndex int) {
+	v.mu.Lock()
+	if v.activeMonitor == monitorIndex {
+		v.mu.Unlock()
+		return
+	}
+	v.activeMonitor = monitorIndex
+	v.mu.Unlock()
+
+	if v.cb.OnSelectMonitor != nil {
+		go v.cb.OnSelectMonitor(monitorIndex)
+	}
+	procInvalidateRect.Call(hwnd, 0, 0)
 }
 
 func (v *remoteViewer) setQuality(hwnd uintptr, q int) {

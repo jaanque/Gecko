@@ -186,6 +186,7 @@ type flashWInfo struct {
 // ClientWindow manages the native Win32 client dialog.
 type ClientWindow struct {
 	hostname  string
+	logoPNG   []byte
 	callbacks ClientCallbacks
 
 	mu        sync.Mutex
@@ -199,6 +200,7 @@ type ClientWindow struct {
 	readyCh   chan struct{}
 	readyOnce sync.Once
 
+	logo      *logoGDI
 	fontLabel uintptr
 	fontHost  uintptr
 	fontBody  uintptr
@@ -212,9 +214,10 @@ var (
 )
 
 // NewClientWindow constructs a ClientWindow instance. Call Run() to start the Win32 message loop.
-func NewClientWindow(hostname string, cb ClientCallbacks) *ClientWindow {
+func NewClientWindow(hostname string, logoPNG []byte, cb ClientCallbacks) *ClientWindow {
 	return &ClientWindow{
 		hostname:  hostname,
+		logoPNG:   logoPNG,
 		callbacks: cb,
 		state:     UIStateConnecting,
 		detail:    "Conectando con el administrador...",
@@ -304,6 +307,17 @@ func (w *ClientWindow) Run() error {
 	w.dpi = getWindowDPI(hwnd)
 	w.initFonts()
 	defer w.destroyFonts()
+
+	if len(w.logoPNG) > 0 {
+		w.logo = newLogoGDI(w.logoPNG)
+		if w.logo != nil {
+			defer w.logo.Close()
+			if w.logo.hIcon != 0 {
+				procSendMessageW.Call(hwnd, wmSetIcon, iconSmall, w.logo.hIcon)
+				procSendMessageW.Call(hwnd, wmSetIcon, iconBig, w.logo.hIcon)
+			}
+		}
+	}
 
 	clientW := w.scale(420)
 	clientH := w.scale(215)
@@ -458,17 +472,25 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 	procSetBkMode.Call(hdc, transparentBk)
 
 	pad := w.scale(24)
+	textLeft := pad
+
+	if w.logo != nil {
+		logoSz := w.scale(48)
+		logoRC := rect{pad, w.scale(24), pad + logoSz, w.scale(24) + logoSz}
+		w.logo.DrawFit(hdc, logoRC)
+		textLeft = pad + logoSz + w.scale(14)
+	}
 
 	// Header label: "NOMBRE DEL EQUIPO"
 	oldFont, _, _ := procSelectObject.Call(hdc, w.fontLabel)
 	procSetTextColor.Call(hdc, rgb(113, 113, 122))
-	rcLbl := rect{pad, w.scale(20), cr.Right - pad, w.scale(38)}
+	rcLbl := rect{textLeft, w.scale(20), cr.Right - pad, w.scale(38)}
 	drawText(hdc, "NOMBRE DEL EQUIPO", &rcLbl, dtLeft|dtSingleLn|dtVCenter)
 
 	// Large clear Hostname
 	procSelectObject.Call(hdc, w.fontHost)
 	procSetTextColor.Call(hdc, rgb(24, 24, 27))
-	rcHost := rect{pad, w.scale(40), cr.Right - pad, w.scale(78)}
+	rcHost := rect{textLeft, w.scale(40), cr.Right - pad, w.scale(78)}
 	drawText(hdc, w.hostname, &rcHost, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 	// Hairline divider

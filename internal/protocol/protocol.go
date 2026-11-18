@@ -56,13 +56,22 @@ const (
 	KeyFlagExtended uint8 = 1 << 0
 )
 
+// MonitorInfo describes one display attached to a client PC.
+type MonitorInfo struct {
+	Index   int  `json:"index"`
+	Width   int  `json:"width"`
+	Height  int  `json:"height"`
+	Primary bool `json:"primary"`
+}
+
 // AuthPayload is sent by the client right after establishing the TLS connection.
 type AuthPayload struct {
-	Token    string `json:"token"`
-	Hostname string `json:"hostname"`
-	OS       string `json:"os"`
-	Width    int    `json:"width"`
-	Height   int    `json:"height"`
+	Token    string        `json:"token"`
+	Hostname string        `json:"hostname"`
+	OS       string        `json:"os"`
+	Width    int           `json:"width"`
+	Height   int           `json:"height"`
+	Monitors []MonitorInfo `json:"monitors,omitempty"`
 }
 
 // AuthRespPayload is sent by the admin in response to MsgAuth.
@@ -91,9 +100,10 @@ type SessionStopPayload struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// StreamConfigPayload adjusts quality or requests a full keyframe.
+// StreamConfigPayload adjusts quality, target monitor, or requests a full keyframe.
 type StreamConfigPayload struct {
-	Quality  int  `json:"quality"` // 30..95
+	Quality  int  `json:"quality,omitempty"`  // 30..95
+	Monitor  *int `json:"monitor,omitempty"`  // 0..N-1 for specific monitor, -1 for all monitors
 	Keyframe bool `json:"keyframe,omitempty"`
 }
 

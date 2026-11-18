@@ -20,8 +20,9 @@ func TestGenerateClientBinary(t *testing.T) {
 	hub := NewHub(id, 9443)
 	fakeTemplate := []byte("MZ\x90\x00fake-client-exe-template-bytes")
 
-	// Auto-appends default agent port when omitted.
-	built, err := hub.GenerateClientBinary(fakeTemplate, "192.168.1.50")
+	// Auto-appends default agent port when omitted and preserves optional logo bytes.
+	fakeLogo := []byte("fake-png-bytes")
+	built, err := hub.GenerateClientBinary(fakeTemplate, "192.168.1.50", fakeLogo)
 	if err != nil {
 		t.Fatalf("GenerateClientBinary failed: %v", err)
 	}
@@ -29,11 +30,11 @@ func TestGenerateClientBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFromBytes failed: %v", err)
 	}
-	if cfg.ServerAddr != "192.168.1.50:9443" || cfg.CertSHA256 != id.CertSHA256 || cfg.AuthToken != id.AuthToken {
+	if cfg.ServerAddr != "192.168.1.50:9443" || cfg.CertSHA256 != id.CertSHA256 || cfg.AuthToken != id.AuthToken || !bytes.Equal(cfg.LogoPNG, fakeLogo) {
 		t.Fatalf("config mismatch: %+v", cfg)
 	}
 
-	if _, err := hub.GenerateClientBinary(nil, "192.168.1.50:9443"); err == nil {
+	if _, err := hub.GenerateClientBinary(nil, "192.168.1.50:9443", nil); err == nil {
 		t.Fatal("expected error with empty template")
 	}
 }
@@ -45,11 +46,11 @@ func TestAgentSessionLifecycle(t *testing.T) {
 	}
 	hub := NewHub(id, 9443)
 
-	startedCh := make(chan string, 1)
+	startedCh := make(chan int, 1)
 	frameCh := make(chan []byte, 1)
 	hub.SetEvents(HubEvents{
-		OnSessionStarted: func(sid, clientID, hostname string, w, h int) {
-			startedCh <- hostname
+		OnSessionStarted: func(sid, clientID, hostname string, w, h, monCount int) {
+			startedCh <- monCount
 		},
 		OnFrame: func(sid string, data []byte) {
 			cp := make([]byte, len(data))
@@ -103,6 +104,10 @@ func TestAgentSessionLifecycle(t *testing.T) {
 		OS:       "windows",
 		Width:    1920,
 		Height:   1080,
+		Monitors: []protocol.MonitorInfo{
+			{Index: 0, Width: 1920, Height: 1080, Primary: true},
+			{Index: 1, Width: 1920, Height: 1080, Primary: false},
+		},
 	}); err != nil {
 		t.Fatalf("write auth failed: %v", err)
 	}
@@ -149,12 +154,24 @@ func TestAgentSessionLifecycle(t *testing.T) {
 	}
 
 	select {
-	case host := <-startedCh:
-		if host != "PC-OFICINA-01" {
-			t.Fatalf("unexpected started host %q", host)
+	case monCount := <-startedCh:
+		if monCount != 2 {
+			t.Fatalf("expected 2 monitors, got %d", monCount)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for OnSessionStarted")
+	}
+
+	// Switch to all monitors (-1) and confirm client receives StreamConfig.
+	hub.SendSelectMonitor(-1)
+	mType, data, err = protocol.ReadMessage(conn)
+	if err != nil || mType != protocol.MsgStreamConfig {
+		t.Fatalf("expected MsgStreamConfig, err=%v type=%d", err, mType)
+	}
+	var sc protocol.StreamConfigPayload
+	_ = json.Unmarshal(data, &sc)
+	if sc.Monitor == nil || *sc.Monitor != -1 {
+		t.Fatalf("expected monitor -1, got %+v", sc.Monitor)
 	}
 
 	wantFrame := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}

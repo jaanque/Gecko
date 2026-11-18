@@ -20,36 +20,38 @@ import (
 
 // ClientInfo is a snapshot of a connected remote PC.
 type ClientInfo struct {
-	ID          string
-	Hostname    string
-	IP          string
-	OS          string
-	Width       int
-	Height      int
-	Status      string // "online", "pending", "active"
-	ConnectedAt time.Time
+	ID           string
+	Hostname     string
+	IP           string
+	OS           string
+	Width        int
+	Height       int
+	MonitorCount int
+	Status       string // "online", "pending", "active"
+	ConnectedAt  time.Time
 }
 
 // HubEvents receives asynchronous notifications from the Hub for the desktop UI.
 type HubEvents struct {
 	OnClientsChanged func(clients []ClientInfo)
 	OnSessionPending func(sessionID, clientID, hostname string)
-	OnSessionStarted func(sessionID, clientID, hostname string, width, height int)
+	OnSessionStarted func(sessionID, clientID, hostname string, width, height, monitorCount int)
 	OnSessionDenied  func(sessionID, clientID, hostname, reason string)
 	OnSessionEnded   func(sessionID, hostname, reason string)
 	OnFrame          func(sessionID string, frameData []byte)
 }
 
 type agentConn struct {
-	id          string
-	hostname    string
-	ip          string
-	os          string
-	width       int
-	height      int
-	status      string
-	sessionID   string
-	connectedAt time.Time
+	id           string
+	hostname     string
+	ip           string
+	os           string
+	width        int
+	height       int
+	monitorCount int
+	status       string
+	sessionID    string
+	connectedAt  time.Time
 
 	conn    net.Conn
 	writeMu sync.Mutex
@@ -123,8 +125,8 @@ func (h *Hub) CertFingerprintShort() string {
 }
 
 // GenerateClientBinary creates a ready-to-run ClienteRemoto.exe embedding the server address,
-// TLS certificate SHA-256 pin, and shared auth token.
-func (h *Hub) GenerateClientBinary(template []byte, serverAddr string) ([]byte, error) {
+// TLS certificate SHA-256 pin, shared auth token, and optional PNG logo.
+func (h *Hub) GenerateClientBinary(template []byte, serverAddr string, logoPNG []byte) ([]byte, error) {
 	if len(template) == 0 {
 		return nil, errors.New("plantilla de cliente no disponible; compila el proyecto con build.bat")
 	}
@@ -143,6 +145,7 @@ func (h *Hub) GenerateClientBinary(template []byte, serverAddr string) ([]byte, 
 		ServerAddr: addr,
 		CertSHA256: h.identity.CertSHA256,
 		AuthToken:  h.identity.AuthToken,
+		LogoPNG:    logoPNG,
 	})
 }
 
@@ -204,16 +207,22 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 		hostname = "EQUIPO-" + clientID[:4]
 	}
 
+	monCount := len(auth.Monitors)
+	if monCount <= 0 {
+		monCount = 1
+	}
+
 	agent := &agentConn{
-		id:          clientID,
-		hostname:    hostname,
-		ip:          hostIP,
-		os:          auth.OS,
-		width:       auth.Width,
-		height:      auth.Height,
-		status:      "online",
-		connectedAt: time.Now(),
-		conn:        rawConn,
+		id:           clientID,
+		hostname:     hostname,
+		ip:           hostIP,
+		os:           auth.OS,
+		width:        auth.Width,
+		height:       auth.Height,
+		monitorCount: monCount,
+		status:       "online",
+		connectedAt:  time.Now(),
+		conn:         rawConn,
 	}
 
 	if err := agent.writeJSON(protocol.MsgAuthResp, protocol.AuthRespPayload{
@@ -292,7 +301,7 @@ func (h *Hub) handleConsentResp(agent *agentConn, resp protocol.ConsentRespPaylo
 		return
 	}
 	hostname := agent.hostname
-	w, ht := agent.width, agent.height
+	w, ht, monCount := agent.width, agent.height, agent.monitorCount
 	onStarted := h.events.OnSessionStarted
 	onDenied := h.events.OnSessionDenied
 
@@ -308,7 +317,7 @@ func (h *Hub) handleConsentResp(agent *agentConn, resp protocol.ConsentRespPaylo
 
 	if resp.Allowed {
 		if onStarted != nil {
-			onStarted(resp.SessionID, agent.id, hostname, w, ht)
+			onStarted(resp.SessionID, agent.id, hostname, w, ht, monCount)
 		}
 	} else {
 		reason := resp.Reason
@@ -467,6 +476,19 @@ func (h *Hub) SendStreamConfig(quality int, keyframe bool) {
 	})
 }
 
+// SendSelectMonitor switches the active client stream to a specific monitor (0..N-1) or all monitors (-1).
+func (h *Hub) SendSelectMonitor(monitorIndex int) {
+	agent := h.activeAgent()
+	if agent == nil {
+		return
+	}
+	m := monitorIndex
+	_ = agent.writeJSON(protocol.MsgStreamConfig, protocol.StreamConfigPayload{
+		Monitor:  &m,
+		Keyframe: true,
+	})
+}
+
 func (h *Hub) activeAgent() *agentConn {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -487,14 +509,15 @@ func (h *Hub) snapshotClientsLocked() []ClientInfo {
 	out := make([]ClientInfo, 0, len(h.agents))
 	for _, a := range h.agents {
 		out = append(out, ClientInfo{
-			ID:          a.id,
-			Hostname:    a.hostname,
-			IP:          a.ip,
-			OS:          a.os,
-			Width:       a.width,
-			Height:      a.height,
-			Status:      a.status,
-			ConnectedAt: a.connectedAt,
+			ID:           a.id,
+			Hostname:     a.hostname,
+			IP:           a.ip,
+			OS:           a.os,
+			Width:        a.width,
+			Height:       a.height,
+			MonitorCount: a.monitorCount,
+			Status:       a.status,
+			ConnectedAt:  a.connectedAt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

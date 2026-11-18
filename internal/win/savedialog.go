@@ -11,12 +11,14 @@ var (
 	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
 
 	procGetSaveFileNameW = comdlg32.NewProc("GetSaveFileNameW")
+	procGetOpenFileNameW = comdlg32.NewProc("GetOpenFileNameW")
 	procMessageBoxW      = user32GUI.NewProc("MessageBoxW")
 )
 
 const (
 	ofnOverwritePrompt = 0x00000002
 	ofnPathMustExist   = 0x00000800
+	ofnFileMustExist   = 0x00001000
 	ofnNoChangeDir     = 0x00000008
 	ofnExplorer        = 0x00080000
 
@@ -78,6 +80,32 @@ func ShowSaveExeDialog(ownerHwnd uintptr, defaultFileName string) (string, bool)
 	}
 
 	ok, _, _ := procGetSaveFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if ok == 0 {
+		return "", false
+	}
+	return syscall.UTF16ToString(fileBuf), true
+}
+
+// ShowOpenLogoDialog opens the native Windows file picker for a PNG/JPEG logo image.
+// Returns ("", false) if the user cancels.
+func ShowOpenLogoDialog(ownerHwnd uintptr) (string, bool) {
+	fileBuf := make([]uint16, 4096)
+	filterStr := "Imágenes (*.png;*.jpg;*.jpeg)\x00*.png;*.jpg;*.jpeg\x00Todos los archivos (*.*)\x00*.*\x00\x00"
+	filterUTF16 := utf16WithNulls(filterStr)
+	titleUTF16, _ := syscall.UTF16PtrFromString("Seleccionar logo del cliente")
+
+	ofn := openFileNameW{
+		LStructSize:  uint32(unsafe.Sizeof(openFileNameW{})),
+		HwndOwner:    ownerHwnd,
+		LpstrFilter:  &filterUTF16[0],
+		NFilterIndex: 1,
+		LpstrFile:    &fileBuf[0],
+		NMaxFile:     uint32(len(fileBuf)),
+		LpstrTitle:   titleUTF16,
+		Flags:        ofnFileMustExist | ofnPathMustExist | ofnNoChangeDir | ofnExplorer,
+	}
+
+	ok, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
 	if ok == 0 {
 		return "", false
 	}

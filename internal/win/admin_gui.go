@@ -4,12 +4,14 @@ package win
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
 
+	"remote-control/internal/config"
 	"remote-control/internal/protocol"
 )
 
@@ -40,19 +42,22 @@ const (
 	esAutoHScroll   = 0x0080
 	wsExDlgModalFrm = 0x00000001
 
-	idGenCombo  = 2001
-	idGenCancel = 2002
-	idGenSave   = 2003
+	idGenCombo      = 2001
+	idGenCancel     = 2002
+	idGenSave       = 2003
+	idGenPickLogo   = 2004
+	idGenRemoveLogo = 2005
 )
 
 // AdminClientRow holds the display data for one online PC in the Admin list.
 type AdminClientRow struct {
-	ID       string
-	Hostname string
-	IP       string
-	Width    int
-	Height   int
-	Status   string // "online", "pending", "active"
+	ID           string
+	Hostname     string
+	IP           string
+	Width        int
+	Height       int
+	MonitorCount int
+	Status       string // "online", "pending", "active"
 }
 
 // AdminCallbacks connects the native desktop Admin GUI to the Hub.
@@ -63,7 +68,8 @@ type AdminCallbacks struct {
 	OnMouse          func(ev protocol.MouseEvent)
 	OnKey            func(ev protocol.KeyEvent)
 	OnQuality        func(quality int)
-	OnGenerateClient func(serverAddr, destPath string) error
+	OnSelectMonitor  func(monitorIndex int)
+	OnGenerateClient func(serverAddr string, logoPNG []byte, destPath string) error
 	OnClose          func()
 }
 
@@ -81,10 +87,11 @@ type adminHitRegion struct {
 }
 
 type pendingOpenSession struct {
-	sessionID string
-	hostname  string
-	width     int
-	height    int
+	sessionID    string
+	hostname     string
+	width        int
+	height       int
+	monitorCount int
 }
 
 // AdminWindow manages the native Windows desktop Administration UI.
@@ -122,11 +129,16 @@ type AdminWindow struct {
 	maxScrollY int32
 
 	// Generate-client modal state
-	genClassName *uint16
-	genHwnd      uintptr
-	genCombo     uintptr
-	genBtnCancel uintptr
-	genBtnSave   uintptr
+	genClassName   *uint16
+	genHwnd        uintptr
+	genCombo       uintptr
+	genBtnCancel   uintptr
+	genBtnSave     uintptr
+	genBtnPickLogo uintptr
+	genBtnRemLogo  uintptr
+	genLogoPNG     []byte
+	genLogoName    string
+	genLogoPreview *logoGDI
 }
 
 var (
@@ -180,15 +192,16 @@ func (a *AdminWindow) SetPending(hostname string) {
 }
 
 // OpenSession opens the native remote viewer window when a client clicks Permitir.
-func (a *AdminWindow) OpenSession(sessionID, hostname string, width, height int) {
+func (a *AdminWindow) OpenSession(sessionID, hostname string, width, height, monitorCount int) {
 	a.mu.Lock()
 	a.pendingHost = ""
 	a.noticeText = ""
 	a.openReq = &pendingOpenSession{
-		sessionID: sessionID,
-		hostname:  hostname,
-		width:     width,
-		height:    height,
+		sessionID:    sessionID,
+		hostname:     hostname,
+		width:        width,
+		height:       height,
+		monitorCount: monitorCount,
 	}
 	hwnd := a.hwnd
 	a.mu.Unlock()
@@ -289,10 +302,11 @@ func (a *AdminWindow) Run() error {
 
 	// Create viewer controller on this UI thread.
 	v := newRemoteViewer(hInst, ViewerCallbacks{
-		OnMouse:      a.callbacks.OnMouse,
-		OnKey:        a.callbacks.OnKey,
-		OnQuality:    a.callbacks.OnQuality,
-		OnDisconnect: a.callbacks.OnDisconnect,
+		OnMouse:         a.callbacks.OnMouse,
+		OnKey:           a.callbacks.OnKey,
+		OnQuality:       a.callbacks.OnQuality,
+		OnSelectMonitor: a.callbacks.OnSelectMonitor,
+		OnDisconnect:    a.callbacks.OnDisconnect,
 	})
 	a.mu.Lock()
 	a.viewer = v
@@ -619,6 +633,9 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 			if c.Width > 0 && c.Height > 0 {
 				meta = fmt.Sprintf("%s · %d×%d", c.IP, c.Width, c.Height)
 			}
+			if c.MonitorCount > 1 {
+				meta = fmt.Sprintf("%s · %d monitores", meta, c.MonitorCount)
+			}
 			procSelectObject.Call(memDC, a.fontMono)
 			procSetTextColor.Call(memDC, rgb(113, 113, 122))
 			metaRC := rect{textLeft, ry + a.scale(32), textRight, ry + a.scale(50)}
@@ -703,8 +720,8 @@ func (a *AdminWindow) openGenerateModal(ownerHwnd uintptr) {
 		return
 	}
 
-	dlgW := a.scale(460)
-	dlgH := a.scale(235)
+	dlgW := a.scale(480)
+	dlgH := a.scale(312)
 	style := uintptr(wsOverlapped | wsCaption | wsSysMenu)
 	rc := rect{0, 0, dlgW, dlgH}
 	procAdjustWindowRectE.Call(uintptr(unsafe.Pointer(&rc)), style, 0, wsExDlgModalFrm)
@@ -737,7 +754,7 @@ func (a *AdminWindow) openGenerateModal(ownerHwnd uintptr) {
 		uintptr(unsafe.Pointer(comboClass)),
 		0,
 		wsChild|wsVisible|wsTabStop|wsVScroll|cbsDropdown|cbsAutoHScroll,
-		uintptr(pad), uintptr(a.scale(118)), uintptr(dlgW-pad*2), uintptr(a.scale(160)),
+		uintptr(pad), uintptr(a.scale(116)), uintptr(dlgW-pad*2), uintptr(a.scale(160)),
 		dlg, idGenCombo, a.hInst, 0,
 	)
 	a.genCombo = combo
@@ -752,12 +769,34 @@ func (a *AdminWindow) openGenerateModal(ownerHwnd uintptr) {
 	}
 
 	btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
+	pickTxt, _ := syscall.UTF16PtrFromString("Elegir imagen...")
+	remTxt, _ := syscall.UTF16PtrFromString("Quitar")
 	cancelTxt, _ := syscall.UTF16PtrFromString("Cancelar")
 	saveTxt, _ := syscall.UTF16PtrFromString("Guardar ClienteRemoto.exe...")
 
+	// Logo picker buttons
+	logoBtnY := a.scale(190)
+	logoBtnH := a.scale(32)
+	remW := a.scale(66)
+	pickW := a.scale(124)
+	a.genBtnRemLogo, _, _ = procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(btnClass)), uintptr(unsafe.Pointer(remTxt)),
+		wsChild|bsOwnerDraw,
+		uintptr(dlgW-pad-remW), uintptr(logoBtnY), uintptr(remW), uintptr(logoBtnH),
+		dlg, idGenRemoveLogo, a.hInst, 0,
+	)
+	a.genBtnPickLogo, _, _ = procCreateWindowExW.Call(
+		0, uintptr(unsafe.Pointer(btnClass)), uintptr(unsafe.Pointer(pickTxt)),
+		wsChild|wsVisible|bsOwnerDraw,
+		uintptr(dlgW-pad-remW-a.scale(8)-pickW), uintptr(logoBtnY), uintptr(pickW), uintptr(logoBtnH),
+		dlg, idGenPickLogo, a.hInst, 0,
+	)
+	a.syncGenLogoButtons()
+
+	// Footer action buttons
 	btnH := a.scale(36)
 	btnY := dlgH - pad - btnH
-	saveW := a.scale(210)
+	saveW := a.scale(216)
 	cancelW := a.scale(96)
 	gap := a.scale(10)
 
@@ -780,6 +819,65 @@ func (a *AdminWindow) openGenerateModal(ownerHwnd uintptr) {
 	procSetFocus.Call(combo)
 }
 
+func (a *AdminWindow) syncGenLogoButtons() {
+	if a.genHwnd == 0 {
+		return
+	}
+	dlgW := a.scale(480)
+	pad := a.scale(22)
+	logoBtnY := a.scale(190)
+	logoBtnH := a.scale(32)
+	remW := a.scale(66)
+	pickW := a.scale(124)
+
+	if len(a.genLogoPNG) > 0 {
+		procShowWindow.Call(a.genBtnRemLogo, swShowNormal)
+		procSetWindowPos.Call(
+			a.genBtnPickLogo, 0,
+			uintptr(dlgW-pad-remW-a.scale(8)-pickW), uintptr(logoBtnY),
+			uintptr(pickW), uintptr(logoBtnH), 0,
+		)
+	} else {
+		procShowWindow.Call(a.genBtnRemLogo, swHide)
+		procSetWindowPos.Call(
+			a.genBtnPickLogo, 0,
+			uintptr(dlgW-pad-pickW), uintptr(logoBtnY),
+			uintptr(pickW), uintptr(logoBtnH), 0,
+		)
+	}
+}
+
+func (a *AdminWindow) handleGeneratePickLogo() {
+	path, ok := ShowOpenLogoDialog(a.genHwnd)
+	if !ok || path == "" {
+		return
+	}
+	pngBytes, err := config.LoadAndNormalizeLogo(path)
+	if err != nil {
+		ShowMessageBox(a.genHwnd, "Logo inválido", err.Error(), true)
+		return
+	}
+	if a.genLogoPreview != nil {
+		a.genLogoPreview.Close()
+	}
+	a.genLogoPNG = pngBytes
+	a.genLogoName = filepath.Base(path)
+	a.genLogoPreview = newLogoGDI(pngBytes)
+	a.syncGenLogoButtons()
+	procInvalidateRect.Call(a.genHwnd, 0, 1)
+}
+
+func (a *AdminWindow) handleGenerateRemoveLogo() {
+	if a.genLogoPreview != nil {
+		a.genLogoPreview.Close()
+		a.genLogoPreview = nil
+	}
+	a.genLogoPNG = nil
+	a.genLogoName = ""
+	a.syncGenLogoButtons()
+	procInvalidateRect.Call(a.genHwnd, 0, 1)
+}
+
 func (a *AdminWindow) closeGenerateModal() {
 	if a.genHwnd == 0 {
 		return
@@ -789,6 +887,8 @@ func (a *AdminWindow) closeGenerateModal() {
 	a.genCombo = 0
 	a.genBtnCancel = 0
 	a.genBtnSave = 0
+	a.genBtnPickLogo = 0
+	a.genBtnRemLogo = 0
 
 	a.mu.Lock()
 	owner := a.hwnd
@@ -816,16 +916,21 @@ func (a *AdminWindow) handleGenerateSave() {
 	}
 
 	if a.callbacks.OnGenerateClient != nil {
-		if err := a.callbacks.OnGenerateClient(addr, destPath); err != nil {
+		if err := a.callbacks.OnGenerateClient(addr, a.genLogoPNG, destPath); err != nil {
 			ShowMessageBox(a.genHwnd, "Error al generar cliente", err.Error(), true)
 			return
 		}
 	}
 
+	hasLogo := len(a.genLogoPNG) > 0
 	a.closeGenerateModal()
 
 	a.mu.Lock()
-	a.noticeText = fmt.Sprintf("ClienteRemoto.exe guardado (%s). Es válido para todos los equipos.", addr)
+	if hasLogo {
+		a.noticeText = fmt.Sprintf("ClienteRemoto.exe generado con logo personalizado (%s).", addr)
+	} else {
+		a.noticeText = fmt.Sprintf("ClienteRemoto.exe guardado (%s). Es válido para todos los equipos.", addr)
+	}
 	a.noticeIsError = false
 	hwnd := a.hwnd
 	a.mu.Unlock()
@@ -863,8 +968,39 @@ func (a *AdminWindow) paintGenModal(hwnd uintptr) {
 
 	procSelectObject.Call(hdc, a.fontBtn)
 	procSetTextColor.Call(hdc, rgb(24, 24, 27))
-	lblRC := rect{pad, a.scale(96), cr.Right - pad, a.scale(116)}
+	lblRC := rect{pad, a.scale(94), cr.Right - pad, a.scale(114)}
 	drawText(hdc, "Dirección de este servidor (IP:Puerto)", &lblRC, dtLeft|dtSingleLn|dtVCenter)
+
+	// Logo section
+	logoLblRC := rect{pad, a.scale(162), cr.Right - pad, a.scale(182)}
+	drawText(hdc, "Logo del cliente (opcional · PNG o JPG)", &logoLblRC, dtLeft|dtSingleLn|dtVCenter)
+
+	boxSz := a.scale(38)
+	boxTop := a.scale(187)
+	boxRC := rect{pad, boxTop, pad + boxSz, boxTop + boxSz}
+	drawRoundedCard(hdc, boxRC, a.scale(5), rgb(246, 247, 249), rgb(228, 228, 231))
+	if a.genLogoPreview != nil {
+		inner := rect{boxRC.Left + a.scale(3), boxRC.Top + a.scale(3), boxRC.Right - a.scale(3), boxRC.Bottom - a.scale(3)}
+		a.genLogoPreview.DrawFit(hdc, inner)
+	}
+
+	nameRight := cr.Right - pad - a.scale(134)
+	if len(a.genLogoPNG) > 0 {
+		nameRight -= a.scale(74)
+	}
+	procSelectObject.Call(hdc, a.fontBody)
+	if a.genLogoName != "" {
+		procSetTextColor.Call(hdc, rgb(24, 24, 27))
+		nRC := rect{boxRC.Right + a.scale(10), boxTop, nameRight, boxTop + boxSz}
+		drawText(hdc, a.genLogoName, &nRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+	} else {
+		procSetTextColor.Call(hdc, rgb(113, 113, 122))
+		nRC := rect{boxRC.Right + a.scale(10), boxTop, nameRight, boxTop + boxSz}
+		drawText(hdc, "Sin logo (predeterminado)", &nRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+	}
+
+	// Subtle divider above footer buttons
+	drawLine(hdc, pad, cr.Bottom-a.scale(72), cr.Right-pad, cr.Bottom-a.scale(72), rgb(244, 244, 245))
 
 	procSelectObject.Call(hdc, oldFont)
 }
@@ -891,6 +1027,18 @@ func (a *AdminWindow) drawGenModalButton(dis *drawItemStruct) {
 			bg = rgb(244, 244, 245)
 		}
 		drawFlatButton(hdc, rc, a.scale(6), bg, rgb(212, 212, 216), rgb(24, 24, 27), "Cancelar")
+	case idGenPickLogo:
+		bg := rgb(255, 255, 255)
+		if pressed {
+			bg = rgb(244, 244, 245)
+		}
+		drawFlatButton(hdc, rc, a.scale(5), bg, rgb(212, 212, 216), rgb(24, 24, 27), "Elegir imagen...")
+	case idGenRemoveLogo:
+		bg := rgb(255, 255, 255)
+		if pressed {
+			bg = rgb(254, 242, 242)
+		}
+		drawFlatButton(hdc, rc, a.scale(5), bg, rgb(254, 202, 202), rgb(185, 28, 28), "Quitar")
 	}
 
 	procSelectObject.Call(hdc, oldFont)
@@ -930,7 +1078,7 @@ func adminWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		v := a.viewer
 		a.mu.Unlock()
 		if req != nil && v != nil {
-			v.Open(req.sessionID, req.hostname, req.width, req.height)
+			v.Open(req.sessionID, req.hostname, req.width, req.height, req.monitorCount)
 		}
 		procInvalidateRect.Call(hwnd, 0, 0)
 		return 0
@@ -989,6 +1137,10 @@ func adminWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case wmClose:
 		a.closeGenerateModal()
+		if a.genLogoPreview != nil {
+			a.genLogoPreview.Close()
+			a.genLogoPreview = nil
+		}
 		a.mu.Lock()
 		v := a.viewer
 		a.mu.Unlock()
@@ -1043,6 +1195,12 @@ func genModalWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 				return 0
 			case idGenSave:
 				a.handleGenerateSave()
+				return 0
+			case idGenPickLogo:
+				a.handleGeneratePickLogo()
+				return 0
+			case idGenRemoveLogo:
+				a.handleGenerateRemoveLogo()
 				return 0
 			}
 		}

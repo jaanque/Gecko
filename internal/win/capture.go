@@ -94,11 +94,13 @@ func ScreenSize() (int, int) {
 	return int(int32(w)), int(int32(h))
 }
 
-// ScreenCapturer captures the Windows virtual desktop with dirty-tile JPEG diffing.
+// ScreenCapturer captures a specific Windows monitor or the full virtual desktop with dirty-tile JPEG diffing.
 type ScreenCapturer struct {
 	hdcMem   uintptr
 	hBitmap  uintptr
 	oldObj   uintptr
+	originX  int
+	originY  int
 	width    int
 	height   int
 	currBGRA []byte
@@ -177,9 +179,9 @@ func (sc *ScreenCapturer) ensureSurface(hdcScreen uintptr, w, h int) error {
 	return nil
 }
 
-// CaptureFrame captures the virtual desktop and returns an encoded MsgFrame payload
-// containing only changed tiles. Returns nil payload when the screen is unchanged.
-func (sc *ScreenCapturer) CaptureFrame(quality int, forceFull bool) ([]byte, int, int, error) {
+// CaptureFrame captures the selected monitor (0 = Monitor 1, -1 = all monitors) and returns
+// an encoded MsgFrame payload containing only changed tiles. Returns nil payload if unchanged.
+func (sc *ScreenCapturer) CaptureFrame(monitorIndex int, quality int, forceFull bool) ([]byte, int, int, error) {
 	if quality < 30 {
 		quality = 30
 	}
@@ -187,17 +189,18 @@ func (sc *ScreenCapturer) CaptureFrame(quality int, forceFull bool) ([]byte, int
 		quality = 95
 	}
 
-	vxRaw, _, _ := procGetSystemMetrics.Call(smXVirtualScreen)
-	vyRaw, _, _ := procGetSystemMetrics.Call(smYVirtualScreen)
-	wRaw, _, _ := procGetSystemMetrics.Call(smCXVirtualScreen)
-	hRaw, _, _ := procGetSystemMetrics.Call(smCYVirtualScreen)
-
-	vx := int(int32(vxRaw))
-	vy := int(int32(vyRaw))
-	w := int(int32(wRaw))
-	h := int(int32(hRaw))
+	bounds := ResolveMonitorBounds(monitorIndex)
+	vx := bounds.X
+	vy := bounds.Y
+	w := bounds.Width
+	h := bounds.Height
 	if w <= 0 || h <= 0 || w > 16384 || h > 16384 {
-		return nil, 0, 0, errors.New("invalid virtual screen dimensions")
+		return nil, 0, 0, errors.New("invalid capture dimensions")
+	}
+	if vx != sc.originX || vy != sc.originY {
+		sc.originX = vx
+		sc.originY = vy
+		sc.hasPrev = false
 	}
 
 	hdcScreen, _, _ := procGetDC.Call(0)
