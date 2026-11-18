@@ -317,7 +317,7 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 	posX := (int32(screenW) - winW) / 2
 	posY := (int32(screenH) - winH) / 2
 
-	title, _ := syscall.UTF16PtrFromString("Control Remoto — " + hostname)
+	title, _ := syscall.UTF16PtrFromString(hostname)
 	hwnd, _, _ := procCreateWindowExW.Call(
 		0,
 		uintptr(unsafe.Pointer(v.className)),
@@ -589,9 +589,9 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 		gap := v.scale(4)
 		btnH := pillH - padY*2
 
-		showW := v.scale(88)
+		showW := v.scale(78)
 		discW := v.scale(30)
-		fullW := v.scale(104)
+		fullW := v.scale(58)
 
 		totalW := padX*2 + showW + gap + discW
 		if v.fullscreen {
@@ -612,7 +612,7 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 		if v.fullscreen {
 			btns = append(btns, viewerToolbarBtn{
 				id:    vbtnFull,
-				label: "Salir pantalla",
+				label: "Salir",
 				rc:    rect{x, padY, x + fullW, padY + btnH},
 			})
 			x += fullW + gap
@@ -757,7 +757,7 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 		hostRC := rect{pad + dotSz + v.scale(9), 0, leftLimit, barH}
 		drawText(memDC, hostname, &hostRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-		statsText := "Conectando vídeo..."
+		statsText := ""
 		if rw > 0 && rh > 0 {
 			if rtt >= 0 {
 				statsText = fmt.Sprintf("%d×%d · %d fps · %d ms", rw, rh, fps, rtt)
@@ -828,7 +828,7 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 			procSelectObject.Call(memDC, v.fontBody)
 			procSetTextColor.Call(memDC, rgb(161, 161, 170))
 			msgRC := rect{0, barH, cw, ch}
-			drawText(memDC, "Cargando pantalla de "+hostname+"...", &msgRC, dtCenter|dtSingleLn|dtVCenter)
+			drawText(memDC, "Cargando...", &msgRC, dtCenter|dtSingleLn|dtVCenter)
 			return
 		}
 

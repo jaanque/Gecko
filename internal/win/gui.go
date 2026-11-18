@@ -60,11 +60,10 @@ const (
 	wsChild       = 0x40000000
 	bsOwnerDraw   = 0x0000000B
 
-	swHide            = 0
-	swShowNormal      = 1
-	swShowNoActivate  = 4
-	swShowMinNoActive = 7
-	swRestore         = 9
+	swHide           = 0
+	swShowNormal     = 1
+	swShowNoActivate = 4
+	swRestore        = 9
 
 	wmDestroy  = 0x0002
 	wmPaint    = 0x000F
@@ -182,27 +181,11 @@ type flashWInfo struct {
 	DwTimeout uint32
 }
 
-// ClientWindowOptions customizes the native client window appearance and behavior.
-type ClientWindowOptions struct {
-	Hostname       string
-	LogoPNG        []byte
-	AppTitle       string
-	PromptMessage  string
-	StartMinimized bool
-	HideDisconnect bool
-	MuteSound      bool
-}
-
-// ClientWindow manages the native Win32 client dialog.
+// ClientWindow manages the native Win32 client dialog (Catalan UI).
 type ClientWindow struct {
-	hostname       string
-	logoPNG        []byte
-	appTitle       string
-	promptMessage  string
-	startMinimized bool
-	hideDisconnect bool
-	muteSound      bool
-	callbacks      ClientCallbacks
+	hostname  string
+	logoPNG   []byte
+	callbacks ClientCallbacks
 
 	mu        sync.Mutex
 	state     ClientUIState
@@ -215,12 +198,11 @@ type ClientWindow struct {
 	readyCh   chan struct{}
 	readyOnce sync.Once
 
-	logo      *logoGDI
-	fontLabel uintptr
-	fontHost  uintptr
-	fontBody  uintptr
-	fontBtn   uintptr
-	bgBrush   uintptr
+	logo     *logoGDI
+	fontHost uintptr
+	fontBody uintptr
+	fontBtn  uintptr
+	bgBrush  uintptr
 }
 
 var (
@@ -229,28 +211,15 @@ var (
 )
 
 // NewClientWindow constructs a ClientWindow instance. Call Run() to start the Win32 message loop.
-func NewClientWindow(opts ClientWindowOptions, cb ClientCallbacks) *ClientWindow {
-	title := opts.AppTitle
-	if title == "" {
-		title = "Cliente Remoto"
-	}
-	prompt := opts.PromptMessage
-	if prompt == "" {
-		prompt = "El administrador solicita controlar este equipo."
-	}
+func NewClientWindow(hostname string, logoPNG []byte, cb ClientCallbacks) *ClientWindow {
 	return &ClientWindow{
-		hostname:       opts.Hostname,
-		logoPNG:        opts.LogoPNG,
-		appTitle:       title,
-		promptMessage:  prompt,
-		startMinimized: opts.StartMinimized,
-		hideDisconnect: opts.HideDisconnect,
-		muteSound:      opts.MuteSound,
-		callbacks:      cb,
-		state:          UIStateConnecting,
-		detail:         "Conectando con el administrador...",
-		dpi:            96,
-		readyCh:        make(chan struct{}),
+		hostname:  hostname,
+		logoPNG:   logoPNG,
+		callbacks: cb,
+		state:     UIStateConnecting,
+		detail:    "Connectant...",
+		dpi:       96,
+		readyCh:   make(chan struct{}),
 	}
 }
 
@@ -295,7 +264,7 @@ func (w *ClientWindow) Run() error {
 	defer procDeleteObject.Call(w.bgBrush)
 
 	className, _ := syscall.UTF16PtrFromString("RemoteClientWindowClass")
-	title, _ := syscall.UTF16PtrFromString(w.appTitle)
+	title, _ := syscall.UTF16PtrFromString("Client Remot")
 
 	wc := wndClassExW{
 		CbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
@@ -357,9 +326,9 @@ func (w *ClientWindow) Run() error {
 	procSetWindowPos.Call(hwnd, 0, uintptr(posX), uintptr(posY), uintptr(winW), uintptr(winH), 0)
 
 	btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
-	allowTxt, _ := syscall.UTF16PtrFromString("Permitir")
+	allowTxt, _ := syscall.UTF16PtrFromString("Permetre")
 	denyTxt, _ := syscall.UTF16PtrFromString("Denegar")
-	discTxt, _ := syscall.UTF16PtrFromString("Desconectar")
+	discTxt, _ := syscall.UTF16PtrFromString("Desconnectar")
 
 	btnStyle := uintptr(wsChild | bsOwnerDraw)
 	btnY := w.scale(150)
@@ -393,11 +362,7 @@ func (w *ClientWindow) Run() error {
 	w.mu.Unlock()
 
 	w.applyStateToControls()
-	if w.startMinimized {
-		procShowWindow.Call(hwnd, swShowMinNoActive)
-	} else {
-		procShowWindow.Call(hwnd, swShowNormal)
-	}
+	procShowWindow.Call(hwnd, swShowNormal)
 	procUpdateWindow.Call(hwnd)
 	w.readyOnce.Do(func() { close(w.readyCh) })
 
@@ -419,14 +384,13 @@ func (w *ClientWindow) scale(px int32) int32 {
 
 func (w *ClientWindow) initFonts() {
 	face, _ := syscall.UTF16PtrFromString("Segoe UI")
-	w.fontLabel = createFont(w.scale(12), 600, face)
 	w.fontHost = createFont(w.scale(26), 600, face)
 	w.fontBody = createFont(w.scale(15), 400, face)
 	w.fontBtn = createFont(w.scale(14), 600, face)
 }
 
 func (w *ClientWindow) destroyFonts() {
-	for _, f := range []uintptr{w.fontLabel, w.fontHost, w.fontBody, w.fontBtn} {
+	for _, f := range []uintptr{w.fontHost, w.fontBody, w.fontBtn} {
 		if f != 0 {
 			procDeleteObject.Call(f)
 		}
@@ -458,9 +422,7 @@ func (w *ClientWindow) applyStateToControls() {
 			procShowWindow.Call(hwnd, swShowNoActivate)
 		}
 		procSetWindowPos.Call(hwnd, hwndTopMost, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate|swpShowWindow)
-		if !w.muteSound {
-			procMessageBeep.Call(mbIconAsterisk)
-		}
+		procMessageBeep.Call(mbIconAsterisk)
 		fi := flashWInfo{
 			CbSize:  uint32(unsafe.Sizeof(flashWInfo{})),
 			Hwnd:    hwnd,
@@ -471,7 +433,7 @@ func (w *ClientWindow) applyStateToControls() {
 	} else {
 		procShowWindow.Call(btnAllow, swHide)
 		procShowWindow.Call(btnDeny, swHide)
-		if st == UIStateActive && !w.hideDisconnect {
+		if st == UIStateActive {
 			procShowWindow.Call(btnDisc, swShowNormal)
 		} else {
 			procShowWindow.Call(btnDisc, swHide)
@@ -505,16 +467,10 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 		textLeft = pad + logoSz + w.scale(14)
 	}
 
-	// Header label: "NOMBRE DEL EQUIPO"
-	oldFont, _, _ := procSelectObject.Call(hdc, w.fontLabel)
-	procSetTextColor.Call(hdc, rgb(113, 113, 122))
-	rcLbl := rect{textLeft, w.scale(20), cr.Right - pad, w.scale(38)}
-	drawText(hdc, "NOMBRE DEL EQUIPO", &rcLbl, dtLeft|dtSingleLn|dtVCenter)
-
 	// Large clear Hostname
-	procSelectObject.Call(hdc, w.fontHost)
+	oldFont, _, _ := procSelectObject.Call(hdc, w.fontHost)
 	procSetTextColor.Call(hdc, rgb(24, 24, 27))
-	rcHost := rect{textLeft, w.scale(40), cr.Right - pad, w.scale(78)}
+	rcHost := rect{textLeft, w.scale(26), cr.Right - pad, w.scale(72)}
 	drawText(hdc, w.hostname, &rcHost, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 	// Hairline divider
@@ -537,20 +493,20 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 	case UIStatePrompt:
 		procSetTextColor.Call(hdc, rgb(24, 24, 27))
 		rcMsg := rect{pad, w.scale(108), cr.Right - pad, w.scale(136)}
-		drawText(hdc, w.promptMessage, &rcMsg, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+		drawText(hdc, "L'administrador sol·licita controlar aquest equip.", &rcMsg, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 	case UIStateActive:
 		drawStatusDot(hdc, pad, w.scale(158), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(21, 128, 61))
 		rcTxt := rect{pad + w.scale(18), w.scale(148), cr.Right - w.scale(164), w.scale(178)}
-		drawText(hdc, "Control remoto activo", &rcTxt, dtLeft|dtSingleLn|dtVCenter)
+		drawText(hdc, "Sessió activa", &rcTxt, dtLeft|dtSingleLn|dtVCenter)
 
 	case UIStateOnline:
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(63, 63, 70))
 		txt := detail
 		if txt == "" {
-			txt = "En línea · Esperando conexión"
+			txt = "En línia"
 		}
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, txt, &rcTxt, dtLeft|dtSingleLn|dtVCenter)
@@ -566,7 +522,7 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 		procSetTextColor.Call(hdc, rgb(82, 82, 91))
 		txt := detail
 		if txt == "" {
-			txt = "Conectando..."
+			txt = "Connectant..."
 		}
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, txt, &rcTxt, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
@@ -585,7 +541,7 @@ func (w *ClientWindow) drawButton(dis *drawItemStruct) {
 
 	switch dis.CtlID {
 	case idBtnAllow:
-		label = "Permitir"
+		label = "Permetre"
 		if pressed {
 			bgColor = rgb(20, 83, 45)
 			borderColor = rgb(20, 83, 45)
@@ -606,7 +562,7 @@ func (w *ClientWindow) drawButton(dis *drawItemStruct) {
 		textColor = rgb(185, 28, 28)
 
 	case idBtnDisconnect:
-		label = "Desconectar"
+		label = "Desconnectar"
 		if pressed {
 			bgColor = rgb(244, 244, 245)
 		} else {

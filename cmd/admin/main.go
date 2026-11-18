@@ -60,18 +60,8 @@ func main() {
 		OnSelectMonitor: func(monitorIndex int) {
 			relayClient.SendSelectMonitor(monitorIndex)
 		},
-		OnGenerateClient: func(params win.ClientGenParams, destPath string) error {
-			built, err := relayClient.GenerateClientBinary(template, admin.ClientBuildOptions{
-				ServerAddr:        params.ServerAddr,
-				LogoPNG:           params.LogoPNG,
-				AppTitle:          params.AppTitle,
-				PromptMessage:     params.PromptMessage,
-				ConsentTimeoutSec: params.ConsentTimeoutSec,
-				DefaultQuality:    params.DefaultQuality,
-				StartMinimized:    params.StartMinimized,
-				HideDisconnect:    params.HideDisconnect,
-				MuteSound:         params.MuteSound,
-			})
+		OnGenerateClient: func(logoPNG []byte, destPath string) error {
+			built, err := relayClient.GenerateClientBinary(template, logoPNG)
 			if err != nil {
 				return err
 			}

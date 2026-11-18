@@ -181,19 +181,6 @@ func ConstantTimeTokenEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-// ShortFingerprint formats the first 16 hex chars of a SHA-256 fingerprint for display.
-func ShortFingerprint(hexFP string) string {
-	if len(hexFP) < 16 {
-		return hexFP
-	}
-	upper := strings.ToUpper(hexFP[:16])
-	var parts []string
-	for i := 0; i < len(upper); i += 4 {
-		parts = append(parts, upper[i:i+4])
-	}
-	return strings.Join(parts, ":") + "…"
-}
-
 func generateSelfSignedCert(certPath, keyPath string) error {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

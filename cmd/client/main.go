@@ -53,7 +53,7 @@ func main() {
 
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
-		hostname = "EQUIPO"
+		hostname = "EQUIP"
 	}
 
 	cfg, cfgErr := config.ReadFromExecutable()
@@ -75,26 +75,14 @@ func main() {
 		injector:  win.NewInputInjector(),
 		ackWakeCh: make(chan struct{}, 1),
 	}
-	initQual := cfg.DefaultQuality
-	if initQual < 35 || initQual > 95 {
-		initQual = 78
-	}
-	agent.quality.Store(int32(initQual))
+	agent.quality.Store(78)
 
-	window := win.NewClientWindow(win.ClientWindowOptions{
-		Hostname:       hostname,
-		LogoPNG:        cfg.LogoPNG,
-		AppTitle:       cfg.AppTitle,
-		PromptMessage:  cfg.PromptMessage,
-		StartMinimized: cfg.StartMinimized,
-		HideDisconnect: cfg.HideDisconnect,
-		MuteSound:      cfg.MuteSound,
-	}, win.ClientCallbacks{
+	window := win.NewClientWindow(hostname, cfg.LogoPNG, win.ClientCallbacks{
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
 		OnClose: func() {
-			agent.stopAllSessions("Cliente cerrado")
+			agent.stopAllSessions("Client tancat")
 			cancel()
 		},
 	})
@@ -103,7 +91,7 @@ func main() {
 	if cfgErr != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(win.UIStateError, "Sin configuración. Genera este cliente desde el Admin.")
+			window.SetState(win.UIStateError, "Sense configuració")
 		}()
 		_ = window.Run()
 		return
@@ -113,7 +101,7 @@ func main() {
 	if err != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(win.UIStateError, "Certificado inválido en la configuración.")
+			window.SetState(win.UIStateError, "Certificat no vàlid")
 		}()
 		_ = window.Run()
 		return
@@ -135,7 +123,7 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		a.window.SetState(win.UIStateConnecting, "Conectando con el administrador...")
+		a.window.SetState(win.UIStateConnecting, "Connectant...")
 
 		err := a.connectAndServe(ctx)
 		a.cleanupAfterDisconnect()
@@ -145,10 +133,10 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		}
 		if err != nil {
 			if errors.Is(err, errAuthRejected) {
-				a.window.SetState(win.UIStateError, "Acceso rechazado: genera un nuevo cliente.")
+				a.window.SetState(win.UIStateError, "Accés rebutjat")
 				backoff = 5 * time.Second
 			} else {
-				a.window.SetState(win.UIStateConnecting, "Reconectando...")
+				a.window.SetState(win.UIStateConnecting, "Reconnectant...")
 			}
 		}
 
@@ -166,11 +154,15 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 var errAuthRejected = errors.New("authentication rejected")
 
 func (a *clientAgent) connectAndServe(ctx context.Context) error {
-	dialer := &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 15 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", a.cfg.ServerAddr, a.tlsCfg)
+	tlsDialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 15 * time.Second},
+		Config:    a.tlsCfg,
+	}
+	rawConn, err := tlsDialer.DialContext(ctx, "tcp", a.cfg.ServerAddr)
 	if err != nil {
 		return err
 	}
+	conn := rawConn.(*tls.Conn)
 	defer conn.Close()
 
 	if tc, ok := conn.NetConn().(*net.TCPConn); ok {
@@ -229,7 +221,7 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	a.conn = conn
 	a.mu.Unlock()
 
-	a.window.SetState(win.UIStateOnline, "En línea · Esperando conexión")
+	a.window.SetState(win.UIStateOnline, "En línia")
 
 	// Start periodic heartbeat ping.
 	pingDone := make(chan struct{})
@@ -330,17 +322,13 @@ func (a *clientAgent) handleConsentRequest(req protocol.ConsentReqPayload) {
 			_ = a.writeJSON(conn, protocol.MsgConsentResp, protocol.ConsentRespPayload{
 				SessionID: req.SessionID,
 				Allowed:   false,
-				Reason:    "El equipo ya está ocupado",
+				Reason:    "L'equip ja està ocupat",
 			})
 		}
 		return
 	}
 
-	timeoutSec := a.cfg.ConsentTimeoutSec
-	if timeoutSec <= 0 {
-		timeoutSec = req.TimeoutSec
-	}
-	timeout := time.Duration(timeoutSec) * time.Second
+	timeout := time.Duration(req.TimeoutSec) * time.Second
 	if timeout < 10*time.Second || timeout > 300*time.Second {
 		timeout = 60 * time.Second
 	}
@@ -369,10 +357,10 @@ func (a *clientAgent) expirePendingPrompt(sessionID string) {
 		_ = a.writeJSON(conn, protocol.MsgConsentResp, protocol.ConsentRespPayload{
 			SessionID: sessionID,
 			Allowed:   false,
-			Reason:    "Tiempo de espera agotado",
+			Reason:    "Temps d'espera esgotat",
 		})
 	}
-	a.window.SetState(win.UIStateOnline, "En línea · Esperando conexión")
+	a.window.SetState(win.UIStateOnline, "En línia")
 }
 
 func (a *clientAgent) onUserAllow() {
@@ -431,15 +419,15 @@ func (a *clientAgent) onUserDeny() {
 		_ = a.writeJSON(conn, protocol.MsgConsentResp, protocol.ConsentRespPayload{
 			SessionID: sid,
 			Allowed:   false,
-			Reason:    "Denegado por el usuario",
+			Reason:    "Denegat per l'usuari",
 		})
 	}
-	a.window.SetState(win.UIStateOnline, "En línea · Esperando conexión")
+	a.window.SetState(win.UIStateOnline, "En línia")
 }
 
 func (a *clientAgent) onUserDisconnect() {
-	a.stopAllSessions("Desconectado por el usuario")
-	a.window.SetState(win.UIStateOnline, "En línea · Esperando conexión")
+	a.stopAllSessions("Desconnectat per l'usuari")
+	a.window.SetState(win.UIStateOnline, "En línia")
 }
 
 func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
@@ -467,7 +455,7 @@ func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
 	if changed {
 		a.injector.ReleaseAllKeys()
 		if connected {
-			a.window.SetState(win.UIStateOnline, "En línea · Esperando conexión")
+			a.window.SetState(win.UIStateOnline, "En línia")
 		}
 	}
 }

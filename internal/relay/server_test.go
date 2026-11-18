@@ -114,9 +114,7 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	}
 
 	// Verify generated client binary uses ClientToken (NEVER AdminToken!).
-	genBin, err := admClient.GenerateClientBinary([]byte("MZ\x90\x00fake-template"), admin.ClientBuildOptions{
-		AppTitle: "Soporte",
-	})
+	genBin, err := admClient.GenerateClientBinary([]byte("MZ\x90\x00fake-template"), nil)
 	if err != nil {
 		t.Fatalf("GenerateClientBinary failed: %v", err)
 	}
@@ -226,5 +224,60 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	mType, _, err = protocol.ReadMessage(cliConn)
 	if err != nil || mType != protocol.MsgSessionStop {
 		t.Fatalf("expected MsgSessionStop, err=%v type=%d", err, mType)
+	}
+}
+
+func TestRelayClientReconfigureDoesNotClobberConn(t *testing.T) {
+	id, err := security.LoadOrCreateIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateIdentity failed: %v", err)
+	}
+	srv := relay.NewServer(id)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", security.ServerTLSConfig(id.Certificate))
+	if err != nil {
+		t.Fatalf("tls.Listen failed: %v", err)
+	}
+	defer ln.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	admClient := admin.NewRelayClient(t.TempDir())
+	defer admClient.Close()
+
+	connectedCh := make(chan bool, 8)
+	admClient.SetEvents(admin.RelayEvents{
+		OnRelayStatus: func(connected bool, _ string) {
+			if connected {
+				select {
+				case connectedCh <- true:
+				default:
+				}
+			}
+		},
+	})
+
+	// Trigger a first connection, then immediately reconfigure/restart multiple times.
+	prof := security.RelayProfile{
+		ServerAddr:  ln.Addr().String(),
+		CertSHA256:  id.CertSHA256,
+		AdminToken:  id.AdminToken,
+		ClientToken: id.ClientToken,
+	}
+	for i := 0; i < 4; i++ {
+		if err := admClient.Configure(prof); err != nil {
+			t.Fatalf("Configure #%d failed: %v", i, err)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	select {
+	case <-connectedCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("admin did not reconnect")
+	}
+
+	// Give any previous canceled loops time to finish exiting and ensure they never clear c.conn.
+	time.Sleep(150 * time.Millisecond)
+	if err := admClient.RequestConnect("nonexistent-id"); err != nil {
+		t.Fatalf("expected active connection after reconfigure, got error: %v", err)
 	}
 }

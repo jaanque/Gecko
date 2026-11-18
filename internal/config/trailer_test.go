@@ -25,17 +25,10 @@ func TestTrailerAppendAndRead(t *testing.T) {
 	}
 
 	cfg1 := ClientConfig{
-		ServerAddr:        "192.168.1.50:9443",
-		CertSHA256:        strings.Repeat("a", 64),
-		AuthToken:         "0123456789abcdef0123456789abcdef",
-		LogoPNG:           normLogo,
-		AppTitle:          "Soporte IT",
-		PromptMessage:     "Soporte técnico solicita acceso a tu equipo.",
-		ConsentTimeoutSec: 90,
-		DefaultQuality:    92,
-		StartMinimized:    true,
-		HideDisconnect:    false,
-		MuteSound:         true,
+		ServerAddr: "192.168.1.50:9443",
+		CertSHA256: strings.Repeat("a", 64),
+		AuthToken:  "0123456789abcdef0123456789abcdef",
+		LogoPNG:    normLogo,
 	}
 
 	built, err := AppendToBinary(base, cfg1)
@@ -47,11 +40,7 @@ func TestTrailerAppendAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFromBytes failed: %v", err)
 	}
-	if got.ServerAddr != cfg1.ServerAddr || got.CertSHA256 != cfg1.CertSHA256 || got.AuthToken != cfg1.AuthToken ||
-		!bytes.Equal(got.LogoPNG, cfg1.LogoPNG) || got.AppTitle != cfg1.AppTitle ||
-		got.PromptMessage != cfg1.PromptMessage || got.ConsentTimeoutSec != cfg1.ConsentTimeoutSec ||
-		got.DefaultQuality != cfg1.DefaultQuality || got.StartMinimized != cfg1.StartMinimized ||
-		got.MuteSound != cfg1.MuteSound {
+	if got.ServerAddr != cfg1.ServerAddr || got.CertSHA256 != cfg1.CertSHA256 || got.AuthToken != cfg1.AuthToken || !bytes.Equal(got.LogoPNG, cfg1.LogoPNG) {
 		t.Fatalf("mismatch: got %+v, want %+v", got, cfg1)
 	}
 

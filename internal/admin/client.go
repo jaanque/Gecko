@@ -19,19 +19,6 @@ import (
 	"remote-control/internal/security"
 )
 
-// ClientBuildOptions contains all admin-configurable settings embedded into ClienteRemoto.exe.
-type ClientBuildOptions struct {
-	ServerAddr        string
-	LogoPNG           []byte
-	AppTitle          string
-	PromptMessage     string
-	ConsentTimeoutSec int
-	DefaultQuality    int
-	StartMinimized    bool
-	HideDisconnect    bool
-	MuteSound         bool
-}
-
 // RelayEvents delivers real-time Relay state and remote session callbacks to the desktop UI.
 type RelayEvents struct {
 	OnRelayStatus    func(connected bool, detail string)
@@ -56,6 +43,7 @@ type RelayClient struct {
 	conn          net.Conn
 	writeMu       sync.Mutex
 	activeSession string
+	loopGen       uint64
 	loopCancel    context.CancelFunc
 }
 
@@ -125,9 +113,15 @@ func (c *RelayClient) Configure(p security.RelayProfile) error {
 // Start begins (or restarts) the background auto-reconnecting Relay connection loop.
 func (c *RelayClient) Start() {
 	c.mu.Lock()
+	c.loopGen++
+	gen := c.loopGen
 	if c.loopCancel != nil {
 		c.loopCancel()
 		c.loopCancel = nil
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
 	}
 	if !c.hasProfile {
 		ev := c.events
@@ -142,13 +136,14 @@ func (c *RelayClient) Start() {
 	c.loopCancel = cancel
 	c.mu.Unlock()
 
-	go c.runLoop(ctx, prof)
+	go c.runLoop(ctx, gen, prof)
 }
 
 // Close shuts down the Relay connection cleanly.
 func (c *RelayClient) Close() {
 	c.DisconnectSession("Administrador cerrado")
 	c.mu.Lock()
+	c.loopGen++
 	if c.loopCancel != nil {
 		c.loopCancel()
 		c.loopCancel = nil
@@ -161,8 +156,8 @@ func (c *RelayClient) Close() {
 }
 
 // GenerateClientBinary creates a ClienteRemoto.exe bound to the configured Relay server
-// using the Relay's pinned certificate and ClientToken (never AdminToken).
-func (c *RelayClient) GenerateClientBinary(template []byte, opts ClientBuildOptions) ([]byte, error) {
+// using the Relay's pinned certificate, ClientToken (never AdminToken), and optional PNG logo.
+func (c *RelayClient) GenerateClientBinary(template []byte, logoPNG []byte) ([]byte, error) {
 	if len(template) == 0 {
 		return nil, errors.New("plantilla de cliente no disponible; compila el proyecto con build.bat")
 	}
@@ -172,42 +167,14 @@ func (c *RelayClient) GenerateClientBinary(template []byte, opts ClientBuildOpti
 	c.mu.RUnlock()
 
 	if !ok {
-		return nil, errors.New("configura primero el servidor puente en la pestaña Servidor")
-	}
-
-	addr := strings.TrimSpace(opts.ServerAddr)
-	if addr == "" {
-		addr = prof.ServerAddr
-	}
-	addr = normalizeHostPort(addr, "9443")
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		return nil, errors.New("dirección de servidor inválida (usa dominio:puerto o IP:puerto)")
-	}
-
-	timeout := opts.ConsentTimeoutSec
-	if timeout < 10 {
-		timeout = 60
-	} else if timeout > 300 {
-		timeout = 300
-	}
-
-	quality := opts.DefaultQuality
-	if quality != 55 && quality != 78 && quality != 92 {
-		quality = 78
+		return nil, errors.New("configura el servidor primero")
 	}
 
 	return config.AppendToBinary(template, config.ClientConfig{
-		ServerAddr:        addr,
-		CertSHA256:        prof.CertSHA256,
-		AuthToken:         prof.ClientToken,
-		LogoPNG:           opts.LogoPNG,
-		AppTitle:          strings.TrimSpace(opts.AppTitle),
-		PromptMessage:     strings.TrimSpace(opts.PromptMessage),
-		ConsentTimeoutSec: timeout,
-		DefaultQuality:    quality,
-		StartMinimized:    opts.StartMinimized,
-		HideDisconnect:    opts.HideDisconnect,
-		MuteSound:         opts.MuteSound,
+		ServerAddr: prof.ServerAddr,
+		CertSHA256: prof.CertSHA256,
+		AuthToken:  prof.ClientToken,
+		LogoPNG:    logoPNG,
 	})
 }
 
@@ -284,25 +251,41 @@ func (c *RelayClient) currentConn() net.Conn {
 	return c.conn
 }
 
-func (c *RelayClient) runLoop(ctx context.Context, prof security.RelayProfile) {
+func (c *RelayClient) isCurrentGen(gen uint64) bool {
+	c.mu.RLock()
+	ok := c.loopGen == gen
+	c.mu.RUnlock()
+	return ok
+}
+
+func (c *RelayClient) runLoop(ctx context.Context, gen uint64, prof security.RelayProfile) {
 	tlsCfg, err := security.PinnedClientTLSConfig(prof.CertSHA256)
 	if err != nil {
-		c.emitStatus(false, "Certificado TLS inválido")
+		c.emitStatus(gen, false, "Certificado TLS inválido")
 		return
 	}
 
 	backoff := time.Second
-	for ctx.Err() == nil {
-		c.emitStatus(false, "Conectando a "+prof.ServerAddr+"...")
+	for ctx.Err() == nil && c.isCurrentGen(gen) {
+		c.emitStatus(gen, false, "Conectando a "+prof.ServerAddr+"...")
 
-		err := c.connectAndServe(ctx, prof, tlsCfg)
+		err := c.connectAndServe(ctx, gen, prof, tlsCfg)
 
 		c.mu.Lock()
-		hadSession := c.activeSession != ""
-		c.activeSession = ""
-		c.conn = nil
-		ev := c.events
+		isCur := c.loopGen == gen
+		var hadSession bool
+		var ev RelayEvents
+		if isCur {
+			hadSession = c.activeSession != ""
+			c.activeSession = ""
+			c.conn = nil
+			ev = c.events
+		}
 		c.mu.Unlock()
+
+		if !isCur || ctx.Err() != nil {
+			return
+		}
 
 		if ev.OnClientsChanged != nil {
 			ev.OnClientsChanged(nil)
@@ -310,12 +293,8 @@ func (c *RelayClient) runLoop(ctx context.Context, prof security.RelayProfile) {
 		if hadSession && ev.OnSessionEnded != nil {
 			ev.OnSessionEnded("", "", "Se perdió la conexión con el servidor puente.")
 		}
-		if ctx.Err() != nil {
-			return
-		}
-
 		if err != nil {
-			c.emitStatus(false, err.Error())
+			c.emitStatus(gen, false, err.Error())
 		}
 
 		timer := time.NewTimer(backoff)
@@ -331,13 +310,24 @@ func (c *RelayClient) runLoop(ctx context.Context, prof security.RelayProfile) {
 	}
 }
 
-func (c *RelayClient) connectAndServe(ctx context.Context, prof security.RelayProfile, tlsCfg *tls.Config) error {
-	dialer := &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 15 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", prof.ServerAddr, tlsCfg)
+func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof security.RelayProfile, tlsCfg *tls.Config) error {
+	tlsDialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 15 * time.Second},
+		Config:    tlsCfg,
+	}
+	rawConn, err := tlsDialer.DialContext(ctx, "tcp", prof.ServerAddr)
 	if err != nil {
 		return fmt.Errorf("sin conexión (%s)", prof.ServerAddr)
 	}
-	defer conn.Close()
+	conn := rawConn.(*tls.Conn)
+	defer func() {
+		c.mu.Lock()
+		if c.conn == conn {
+			c.conn = nil
+		}
+		c.mu.Unlock()
+		_ = conn.Close()
+	}()
 
 	if tc, ok := conn.NetConn().(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
@@ -373,9 +363,13 @@ func (c *RelayClient) connectAndServe(ctx context.Context, prof security.RelayPr
 	}
 
 	c.mu.Lock()
+	if c.loopGen != gen {
+		c.mu.Unlock()
+		return nil
+	}
 	c.conn = conn
 	c.mu.Unlock()
-	c.emitStatus(true, prof.ServerAddr)
+	c.emitStatus(gen, true, prof.ServerAddr)
 
 	// Periodic heartbeat (every 10s when idle) and end-to-end RTT probe (every 2s during active session).
 	pingDone := make(chan struct{})
@@ -504,8 +498,12 @@ func (c *RelayClient) handleSessionEvent(sev protocol.SessionEventPayload) {
 	}
 }
 
-func (c *RelayClient) emitStatus(connected bool, detail string) {
+func (c *RelayClient) emitStatus(gen uint64, connected bool, detail string) {
 	c.mu.RLock()
+	if c.loopGen != gen {
+		c.mu.RUnlock()
+		return
+	}
 	cb := c.events.OnRelayStatus
 	c.mu.RUnlock()
 	if cb != nil {
