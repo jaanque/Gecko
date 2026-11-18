@@ -7,7 +7,6 @@
 [![CI](https://github.com/jaanque/Gecko/actions/workflows/ci.yml/badge.svg)](https://github.com/jaanque/Gecko/actions/workflows/ci.yml)
 [![Llicència: MIT](https://img.shields.io/badge/llicència-MIT-18181B)](LICENSE)
 ![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)
-![Zero dependències](https://img.shields.io/badge/dependències-0-16A34A)
 ![Windows & Linux](https://img.shields.io/badge/plataformes-Windows%20%7C%20Linux-2563EB)
 
 *Connecta i assisteix equips Windows i Linux des de qualsevol xarxa, sense instal·lacions al client, sense serveis de tercers i amb control total sobre la teva infraestructura.*
