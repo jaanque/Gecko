@@ -1,6 +1,0 @@
-/target
-**/target
-apps/admin/resources/agent_stub.exe
-*.log
-.DS_Store
-Thumbs.db
