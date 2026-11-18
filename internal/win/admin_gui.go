@@ -22,6 +22,18 @@ var (
 	procEnableWindow        = user32GUI.NewProc("EnableWindow")
 	procSetForegroundWindow = user32GUI.NewProc("SetForegroundWindow")
 	procGetWindowRect       = user32GUI.NewProc("GetWindowRect")
+	procOpenClipboard       = user32GUI.NewProc("OpenClipboard")
+	procEmptyClipboard      = user32GUI.NewProc("EmptyClipboard")
+	procSetClipboardData    = user32GUI.NewProc("SetClipboardData")
+	procCloseClipboard      = user32GUI.NewProc("CloseClipboard")
+	procGlobalAlloc         = kernel32GUI.NewProc("GlobalAlloc")
+	procGlobalLock          = kernel32GUI.NewProc("GlobalLock")
+	procGlobalUnlock        = kernel32GUI.NewProc("GlobalUnlock")
+)
+
+const (
+	cfUnicodeText = 13
+	gmemMoveable  = 0x0002
 )
 
 const (
@@ -108,22 +120,24 @@ type AdminWindow struct {
 	readyOnce      sync.Once
 
 	// UI thread-only state
-	hInst      uintptr
-	dpi        int32
-	cursorArr  uintptr
-	cursorHnd  uintptr
-	fontBrand  uintptr
-	fontSub    uintptr
-	fontTitle  uintptr
-	fontBody   uintptr
-	fontRow    uintptr
-	fontMono   uintptr
-	fontBtn    uintptr
-	bgWhiteBr  uintptr
-	hits       []adminHitRegion
-	hoverIdx   int
-	scrollY    int32
-	maxScrollY int32
+	hInst       uintptr
+	dpi         int32
+	cursorArr   uintptr
+	cursorHnd   uintptr
+	fontBrand   uintptr
+	fontSub     uintptr
+	fontSmall   uintptr
+	fontTitle   uintptr
+	fontBody    uintptr
+	fontRow     uintptr
+	fontMono    uintptr
+	fontBtn     uintptr
+	bgWhiteBr   uintptr
+	menuVisible bool
+	hits        []adminHitRegion
+	hoverIdx    int
+	scrollY     int32
+	maxScrollY  int32
 
 	// Generate-client modal state
 	genClassName   *uint16
@@ -146,11 +160,12 @@ var (
 // NewAdminWindow creates a new desktop AdminWindow. Call Run() on the main goroutine.
 func NewAdminWindow(cfg AdminConfig, cb AdminCallbacks) *AdminWindow {
 	return &AdminWindow{
-		cfg:       cfg,
-		callbacks: cb,
-		dpi:       96,
-		hoverIdx:  -1,
-		readyCh:   make(chan struct{}),
+		cfg:         cfg,
+		callbacks:   cb,
+		dpi:         96,
+		menuVisible: true,
+		hoverIdx:    -1,
+		readyCh:     make(chan struct{}),
 	}
 }
 
@@ -336,8 +351,8 @@ func (a *AdminWindow) Run() error {
 	a.initFonts()
 	defer a.destroyFonts()
 
-	winW := a.scale(740)
-	winH := a.scale(500)
+	winW := a.scale(860)
+	winH := a.scale(540)
 	screenW, _, _ := procGetSystemMetrics.Call(smCXScreen)
 	screenH, _, _ := procGetSystemMetrics.Call(smCYScreen)
 	posX := (int32(screenW) - winW) / 2
@@ -377,17 +392,18 @@ func (a *AdminWindow) scale(px int32) int32 {
 func (a *AdminWindow) initFonts() {
 	face, _ := syscall.UTF16PtrFromString("Segoe UI")
 	mono, _ := syscall.UTF16PtrFromString("Consolas")
-	a.fontBrand = createFont(a.scale(19), 600, face)
+	a.fontBrand = createFont(a.scale(17), 600, face)
 	a.fontSub = createFont(a.scale(12), 400, mono)
+	a.fontSmall = createFont(a.scale(11), 600, face)
 	a.fontTitle = createFont(a.scale(15), 600, face)
-	a.fontBody = createFont(a.scale(14), 400, face)
+	a.fontBody = createFont(a.scale(13), 400, face)
 	a.fontRow = createFont(a.scale(15), 600, face)
 	a.fontMono = createFont(a.scale(12), 400, mono)
 	a.fontBtn = createFont(a.scale(13), 600, face)
 }
 
 func (a *AdminWindow) destroyFonts() {
-	for _, f := range []*uintptr{&a.fontBrand, &a.fontSub, &a.fontTitle, &a.fontBody, &a.fontRow, &a.fontMono, &a.fontBtn} {
+	for _, f := range []*uintptr{&a.fontBrand, &a.fontSub, &a.fontSmall, &a.fontTitle, &a.fontBody, &a.fontRow, &a.fontMono, &a.fontBtn} {
 		if *f != 0 {
 			procDeleteObject.Call(*f)
 			*f = 0

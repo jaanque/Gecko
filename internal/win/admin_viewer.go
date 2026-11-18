@@ -135,13 +135,15 @@ type queuedInput struct {
 }
 
 const (
-	vbtnQualLow = 1
-	vbtnQualMed = 2
-	vbtnQualHi  = 3
-	vbtnFull    = 4
-	vbtnDisc    = 5
-	vbtnMonAll  = 100
-	vbtnMonBase = 200 // 200 + monitorIndex (0, 1, 2, ...)
+	vbtnQualLow   = 1
+	vbtnQualMed   = 2
+	vbtnQualHi    = 3
+	vbtnFull      = 4
+	vbtnDisc      = 5
+	vbtnHideBar   = 6
+	vbtnShowBar   = 7
+	vbtnMonAll    = 100
+	vbtnMonBase   = 200 // 200 + monitorIndex (0, 1, 2, ...)
 )
 
 // ViewerCallbacks wires the native remote desktop viewer back to the Hub.
@@ -198,15 +200,17 @@ type remoteViewer struct {
 	backH   int32
 
 	// UI thread-only state
-	kbHook      uintptr
-	fontBold    uintptr
-	fontBody    uintptr
-	fontMono    uintptr
-	fontBtn     uintptr
-	toolbarBtns []viewerToolbarBtn
-	hoverBtn    int
-	imgRect     rect
-	fullscreen  bool
+	kbHook          uintptr
+	fontBold        uintptr
+	fontBody        uintptr
+	fontMono        uintptr
+	fontBtn         uintptr
+	toolbarBtns     []viewerToolbarBtn
+	toolbarDividers []int32
+	toolbarHidden   bool
+	hoverBtn        int
+	imgRect         rect
+	fullscreen      bool
 	prevStyle   uintptr
 	prevPlace   windowPlacement
 	lastMoveAt  time.Time
@@ -282,6 +286,7 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 
 	v.fb.Reset(remoteW, remoteH)
 	v.fullscreen = false
+	v.toolbarHidden = false
 	v.hoverBtn = 0
 	clear(v.heldKeys)
 	v.mouseBtns = 0
@@ -605,20 +610,36 @@ func (v *remoteViewer) releaseBackbuffer() {
 }
 
 func (v *remoteViewer) layoutToolbar(width int32) int32 {
+	v.toolbarDividers = v.toolbarDividers[:0]
+
+	if v.toolbarHidden {
+		pillW := v.scale(152)
+		pillH := v.scale(24)
+		px := (width - pillW) / 2
+		v.toolbarBtns = []viewerToolbarBtn{
+			{id: vbtnShowBar, label: "▼ Mostrar menú", rc: rect{px, 0, px + pillW, pillH}},
+		}
+		return 0
+	}
+
 	barH := v.scale(44)
-	pad := v.scale(14)
+	pad := v.scale(12)
 	btnH := v.scale(28)
 	btnY := (barH - btnH) / 2
-	gap := v.scale(8)
+	gap := v.scale(6)
 	smallGap := v.scale(4)
 
-	discW := v.scale(96)
-	fullW := v.scale(124)
+	hideW := v.scale(30)
+	discW := v.scale(94)
+	fullW := v.scale(122)
 	qHiW := v.scale(44)
-	qMedW := v.scale(70)
-	qLowW := v.scale(46)
+	qMedW := v.scale(68)
+	qLowW := v.scale(44)
 
 	x := width - pad
+
+	rcHide := rect{x - hideW, btnY, x, btnY + btnH}
+	x = rcHide.Left - gap
 
 	rcDisc := rect{x - discW, btnY, x, btnY + btnH}
 	x = rcDisc.Left - gap
@@ -628,7 +649,9 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 		fullLabel = "Salir pantalla"
 	}
 	rcFull := rect{x - fullW, btnY, x, btnY + btnH}
-	x = rcFull.Left - v.scale(12)
+	x = rcFull.Left - v.scale(8)
+	v.toolbarDividers = append(v.toolbarDividers, x)
+	x -= v.scale(8)
 
 	rcHi := rect{x - qHiW, btnY, x, btnY + btnH}
 	x = rcHi.Left - smallGap
@@ -637,7 +660,7 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	rcLow := rect{x - qLowW, btnY, x, btnY + btnH}
 	x = rcLow.Left
 
-	btns := make([]viewerToolbarBtn, 0, 12)
+	btns := make([]viewerToolbarBtn, 0, 14)
 
 	v.mu.Lock()
 	monCount := v.monitorCount
@@ -646,13 +669,16 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 		if monCount > 6 {
 			monCount = 6
 		}
-		x -= v.scale(14)
-		allW := v.scale(56)
+		x -= v.scale(8)
+		v.toolbarDividers = append(v.toolbarDividers, x)
+		x -= v.scale(8)
+
+		allW := v.scale(54)
 		rcAll := rect{x - allW, btnY, x, btnY + btnH}
 		x = rcAll.Left - smallGap
 
 		monBtns := make([]viewerToolbarBtn, 0, monCount+1)
-		monW := v.scale(38)
+		monW := v.scale(36)
 		for i := monCount - 1; i >= 0; i-- {
 			rcM := rect{x - monW, btnY, x, btnY + btnH}
 			monBtns = append(monBtns, viewerToolbarBtn{
@@ -674,6 +700,7 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 		viewerToolbarBtn{id: vbtnQualHi, label: "Alta", rc: rcHi},
 		viewerToolbarBtn{id: vbtnFull, label: fullLabel, rc: rcFull},
 		viewerToolbarBtn{id: vbtnDisc, label: "Desconectar", rc: rcDisc},
+		viewerToolbarBtn{id: vbtnHideBar, label: "▲", rc: rcHide},
 	)
 	v.toolbarBtns = btns
 	return barH
@@ -698,10 +725,6 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 	memDC := v.ensureBackbuffer(hdc, cw, ch)
 	barH := v.layoutToolbar(cw)
 
-	// 1. Toolbar background (white) + hairline border.
-	fillSolidRect(memDC, rect{0, 0, cw, barH}, rgb(255, 255, 255))
-	drawLine(memDC, 0, barH-1, cw, barH-1, rgb(228, 228, 231))
-
 	v.mu.Lock()
 	hostname := v.hostname
 	rw, rh := v.remoteW, v.remoteH
@@ -712,61 +735,79 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 	v.mu.Unlock()
 
 	procSetBkMode.Call(memDC, transparentBk)
-	pad := v.scale(14)
-	dotSz := v.scale(9)
-	drawStatusDot(memDC, pad, (barH-dotSz)/2, dotSz, rgb(22, 163, 74))
-
 	oldFont, _, _ := procSelectObject.Call(memDC, v.fontBold)
-	procSetTextColor.Call(memDC, rgb(24, 24, 27))
-	leftLimit := v.toolbarBtns[0].rc.Left - v.scale(12)
-	hostRC := rect{pad + dotSz + v.scale(9), 0, leftLimit, barH}
-	drawText(memDC, hostname, &hostRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-	statsText := "Conectando vídeo..."
-	if rw > 0 && rh > 0 {
-		if rtt >= 0 {
-			statsText = fmt.Sprintf("%d×%d · %d fps · %d ms", rw, rh, fps, rtt)
-		} else {
-			statsText = fmt.Sprintf("%d×%d · %d fps", rw, rh, fps)
-		}
-	}
-	statsStart := pad + dotSz + v.scale(9) + int32(len(hostname))*v.scale(9) + v.scale(14)
-	if statsStart < leftLimit-v.scale(90) {
-		procSelectObject.Call(memDC, v.fontMono)
-		procSetTextColor.Call(memDC, rgb(113, 113, 122))
-		statsRC := rect{statsStart, 0, leftLimit, barH}
-		drawText(memDC, statsText, &statsRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
-	}
+	// 1. Toolbar (only painted when visible)
+	if !v.toolbarHidden && barH > 0 {
+		fillSolidRect(memDC, rect{0, 0, cw, barH}, rgb(255, 255, 255))
+		drawLine(memDC, 0, barH-1, cw, barH-1, rgb(228, 228, 231))
 
-	// Toolbar buttons.
-	procSelectObject.Call(memDC, v.fontBtn)
-	for _, b := range v.toolbarBtns {
-		hovered := v.hoverBtn == b.id
-		active := (b.id == vbtnQualLow && qual == qualLowVal) ||
-			(b.id == vbtnQualMed && qual == qualMedVal) ||
-			(b.id == vbtnQualHi && qual == qualHiVal) ||
-			(b.id == vbtnMonAll && activeMon == -1) ||
-			(b.id >= vbtnMonBase && activeMon == b.id-vbtnMonBase)
+		pad := v.scale(14)
+		dotSz := v.scale(9)
+		drawStatusDot(memDC, pad, (barH-dotSz)/2, dotSz, rgb(22, 163, 74))
 
-		bg := rgb(255, 255, 255)
-		border := rgb(212, 212, 216)
-		fg := rgb(24, 24, 27)
+		procSetTextColor.Call(memDC, rgb(24, 24, 27))
+		leftLimit := v.toolbarBtns[0].rc.Left - v.scale(12)
+		hostRC := rect{pad + dotSz + v.scale(9), 0, leftLimit, barH}
+		drawText(memDC, hostname, &hostRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-		switch {
-		case b.id == vbtnDisc:
-			border = rgb(254, 202, 202)
-			fg = rgb(185, 28, 28)
-			if hovered {
-				bg = rgb(254, 242, 242)
+		statsText := "Conectando vídeo..."
+		if rw > 0 && rh > 0 {
+			if rtt >= 0 {
+				statsText = fmt.Sprintf("%d×%d · %d fps · %d ms", rw, rh, fps, rtt)
+			} else {
+				statsText = fmt.Sprintf("%d×%d · %d fps", rw, rh, fps)
 			}
-		case active:
-			bg = rgb(24, 24, 27)
-			border = rgb(24, 24, 27)
-			fg = rgb(255, 255, 255)
-		case hovered:
-			bg = rgb(244, 244, 245)
 		}
-		drawFlatButton(memDC, b.rc, v.scale(5), bg, border, fg, b.label)
+		statsStart := pad + dotSz + v.scale(9) + int32(len(hostname))*v.scale(9) + v.scale(14)
+		if statsStart < leftLimit-v.scale(90) {
+			procSelectObject.Call(memDC, v.fontMono)
+			procSetTextColor.Call(memDC, rgb(113, 113, 122))
+			statsRC := rect{statsStart, 0, leftLimit, barH}
+			drawText(memDC, statsText, &statsRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+		}
+
+		// Subtle vertical section dividers
+		for _, dx := range v.toolbarDividers {
+			drawLine(memDC, dx, v.scale(11), dx, barH-v.scale(11), rgb(228, 228, 231))
+		}
+
+		// Toolbar buttons
+		procSelectObject.Call(memDC, v.fontBtn)
+		for _, b := range v.toolbarBtns {
+			hovered := v.hoverBtn == b.id
+			active := (b.id == vbtnQualLow && qual == qualLowVal) ||
+				(b.id == vbtnQualMed && qual == qualMedVal) ||
+				(b.id == vbtnQualHi && qual == qualHiVal) ||
+				(b.id == vbtnMonAll && activeMon == -1) ||
+				(b.id >= vbtnMonBase && activeMon == b.id-vbtnMonBase)
+
+			bg := rgb(255, 255, 255)
+			border := rgb(212, 212, 216)
+			fg := rgb(24, 24, 27)
+
+			switch {
+			case b.id == vbtnDisc:
+				border = rgb(254, 202, 202)
+				fg = rgb(185, 28, 28)
+				if hovered {
+					bg = rgb(254, 242, 242)
+				}
+			case b.id == vbtnHideBar:
+				fg = rgb(82, 82, 91)
+				if hovered {
+					bg = rgb(244, 244, 245)
+					fg = rgb(24, 24, 27)
+				}
+			case active:
+				bg = rgb(24, 24, 27)
+				border = rgb(24, 24, 27)
+				fg = rgb(255, 255, 255)
+			case hovered:
+				bg = rgb(244, 244, 245)
+			}
+			drawFlatButton(memDC, b.rc, v.scale(5), bg, border, fg, b.label)
+		}
 	}
 
 	// 2. Viewport area (dark neutral #141518).
@@ -820,6 +861,21 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 			srccopy,
 		)
 	})
+
+	// 3. When toolbar is hidden, draw the compact top-center reveal tab on top of the viewport.
+	if v.toolbarHidden && len(v.toolbarBtns) == 1 {
+		b := v.toolbarBtns[0]
+		bg := rgb(24, 24, 27)
+		border := rgb(63, 63, 70)
+		if v.hoverBtn == vbtnShowBar {
+			bg = rgb(39, 39, 42)
+			border = rgb(113, 113, 122)
+		}
+		procSelectObject.Call(memDC, v.fontBtn)
+		// Slightly raise top edge so only bottom corners look rounded like a clean pull-tab.
+		tabRC := rect{b.rc.Left, b.rc.Top - v.scale(4), b.rc.Right, b.rc.Bottom}
+		drawFlatButton(memDC, tabRC, v.scale(6), bg, border, rgb(244, 244, 245), b.label)
+	}
 
 	procSelectObject.Call(memDC, oldFont)
 	procBitBlt.Call(hdc, 0, 0, uintptr(cw), uintptr(ch), memDC, 0, 0, srccopy)
@@ -984,6 +1040,14 @@ func (v *remoteViewer) handleToolbarClick(hwnd uintptr, btnID int) {
 		v.selectMonitor(hwnd, btnID-vbtnMonBase)
 	case btnID == vbtnFull:
 		v.toggleFullscreen(hwnd)
+	case btnID == vbtnHideBar:
+		v.toolbarHidden = true
+		v.hoverBtn = 0
+		procInvalidateRect.Call(hwnd, 0, 0)
+	case btnID == vbtnShowBar:
+		v.toolbarHidden = false
+		v.hoverBtn = 0
+		procInvalidateRect.Call(hwnd, 0, 0)
 	case btnID == vbtnDisc:
 		if v.cb.OnDisconnect != nil {
 			go v.cb.OnDisconnect()
