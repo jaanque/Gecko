@@ -7,19 +7,14 @@
 **Control y asistencia remota para Windows.**  
 *Rápido, privado, sin instalación y de código abierto.*
 
-<br/>
-
-[![Windows](https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/jaanque/Gecko)
-[![Go](https://img.shields.io/badge/Go_1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://github.com/jaanque/Gecko)
-[![Licencia MIT](https://img.shields.io/badge/Licencia_MIT-18181B?style=for-the-badge)](LICENSE)
-
-<br/>
+[![CI](https://github.com/jaanque/Gecko/actions/workflows/ci.yml/badge.svg)](https://github.com/jaanque/Gecko/actions/workflows/ci.yml)
+[![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-18181B)](LICENSE)
+![Windows](https://img.shields.io/badge/plataforma-Windows%20(amd64%20%7C%20arm64)-0078D4?logo=windows&logoColor=white)
+![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)
 
 | ⚡ **60 FPS GPU** | 🔒 **mTLS 1.3** | 🪟 **Win32 Nativo** | 📦 **0 Instalación** |
 | :---: | :---: | :---: | :---: |
 | Captura DirectX 11 DXGI | Cifrado mutuo con Pinning | Cero dependencias externas | Doble clic y listo |
-
-<br/>
 
 </div>
 
