@@ -1,4 +1,4 @@
-//go:build windows || linux
+//go:build windows || linux || darwin
 
 package main
 
@@ -7,6 +7,8 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"net"
 	"os"
 	"os/user"
@@ -18,9 +20,11 @@ import (
 
 	"remote-control/internal/clientui"
 	"remote-control/internal/config"
+	"remote-control/internal/i18n"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
 	"remote-control/internal/transfer"
+	"remote-control/internal/version"
 )
 
 type clientAgent struct {
@@ -28,6 +32,8 @@ type clientAgent struct {
 	tlsCfg   *tls.Config
 	hostname string
 	username string
+	lang     i18n.Lang
+	strings  i18n.ClientStrings
 	sessionW string
 	window   clientWindow
 	injector inputInjector
@@ -53,6 +59,15 @@ type clientAgent struct {
 }
 
 func main() {
+	showVersion := flag.Bool("version", false, "Mostrar versión y salir")
+	langFlag := flag.String("lang", "", "Idioma de interfaz (ca, es, en)")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.Banner("ClientRemot"))
+		return
+	}
+
 	platformInit()
 
 	hostname, err := os.Hostname()
@@ -62,6 +77,17 @@ func main() {
 
 	cfg, cfgErr := config.ReadFromExecutable()
 
+	lang := i18n.LangCA
+	if cfgErr == nil && cfg.Lang != "" {
+		lang = i18n.Normalize(cfg.Lang, i18n.LangCA)
+	} else {
+		lang = i18n.Detect(i18n.LangCA)
+	}
+	if strings.TrimSpace(*langFlag) != "" {
+		lang = i18n.Normalize(*langFlag, lang)
+	}
+	str := i18n.Client(lang)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -69,19 +95,21 @@ func main() {
 		cfg:       cfg,
 		hostname:  hostname,
 		username:  currentUsername(),
-		sessionW:  platformSessionWarning(),
+		lang:      lang,
+		strings:   str,
+		sessionW:  platformSessionWarning(lang),
 		injector:  newPlatformInjector(),
 		receiver:  transfer.NewReceiver(""),
 		ackWakeCh: make(chan struct{}, 1),
 	}
 	agent.quality.Store(78)
 
-	window := newPlatformWindow(hostname, cfg.LogoPNG, clientui.Callbacks{
+	window := newPlatformWindow(hostname, cfg.LogoPNG, lang, clientui.Callbacks{
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
 		OnClose: func() {
-			agent.stopAllSessions("Client tancat")
+			agent.stopAllSessions(str.ClientClosedReason)
 			cancel()
 		},
 	})
@@ -90,7 +118,7 @@ func main() {
 	if cfgErr != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(clientui.StateError, "Sense configuració")
+			window.SetState(clientui.StateError, str.NoConfig)
 		}()
 		_ = window.Run()
 		return
@@ -100,7 +128,7 @@ func main() {
 	if err != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(clientui.StateError, "Certificat no vàlid")
+			window.SetState(clientui.StateError, str.InvalidCert)
 		}()
 		_ = window.Run()
 		return
@@ -120,7 +148,7 @@ func (a *clientAgent) onlineStatusText() string {
 	if a.sessionW != "" {
 		return a.sessionW
 	}
-	return "En línia"
+	return a.strings.Online
 }
 
 func (a *clientAgent) runLoop(ctx context.Context) {
@@ -129,7 +157,7 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		a.window.SetState(clientui.StateConnecting, "Connectant...")
+		a.window.SetState(clientui.StateConnecting, a.strings.Connecting)
 
 		err := a.connectAndServe(ctx)
 		a.cleanupAfterDisconnect()
@@ -139,10 +167,10 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		}
 		if err != nil {
 			if errors.Is(err, errAuthRejected) {
-				a.window.SetState(clientui.StateError, "Accés rebutjat")
+				a.window.SetState(clientui.StateError, a.strings.AccessRejected)
 				backoff = 5 * time.Second
 			} else {
-				a.window.SetState(clientui.StateConnecting, "Reconnectant...")
+				a.window.SetState(clientui.StateConnecting, a.strings.Reconnecting)
 			}
 		}
 
@@ -180,7 +208,6 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		_ = tc.SetReadBuffer(256 * 1024)
 	}
 
-	// Close connection immediately if context is canceled.
 	doneConn := make(chan struct{})
 	go func() {
 		select {
@@ -202,6 +229,7 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		Hostname: a.hostname,
 		OS:       runtime.GOOS,
 		Username: a.username,
+		Version:  version.Version,
 		Width:    w,
 		Height:   h,
 		Monitors: protoMons,
@@ -227,9 +255,9 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	a.mu.Unlock()
 
 	if a.sessionW != "" {
-		a.window.SetState(clientui.StateError, a.sessionW)
+		a.window.SetState(clientui.StateOnline, a.sessionW)
 	} else {
-		a.window.SetState(clientui.StateOnline, "En línia")
+		a.window.SetState(clientui.StateOnline, a.strings.Online)
 	}
 
 	// Start periodic heartbeat ping.
@@ -395,7 +423,6 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 
 func (a *clientAgent) handleConsentRequest(req protocol.ConsentReqPayload) {
 	a.mu.Lock()
-	// If already in an active session or already prompting, reject duplicate request.
 	if a.activeID != "" || a.pendingID != "" {
 		conn := a.conn
 		a.mu.Unlock()
@@ -403,7 +430,7 @@ func (a *clientAgent) handleConsentRequest(req protocol.ConsentReqPayload) {
 			_ = a.writeJSON(conn, protocol.MsgConsentResp, protocol.ConsentRespPayload{
 				SessionID: req.SessionID,
 				Allowed:   false,
-				Reason:    "L'equip ja està ocupat",
+				Reason:    a.strings.BusyReason,
 			})
 		}
 		return
@@ -438,7 +465,7 @@ func (a *clientAgent) expirePendingPrompt(sessionID string) {
 		_ = a.writeJSON(conn, protocol.MsgConsentResp, protocol.ConsentRespPayload{
 			SessionID: sessionID,
 			Allowed:   false,
-			Reason:    "Temps d'espera esgotat",
+			Reason:    a.strings.TimeoutReason,
 		})
 	}
 	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
@@ -476,10 +503,9 @@ func (a *clientAgent) onUserAllow() {
 		return
 	}
 
-	// Only unlock OS input injection after strict mTLS 1.3 + pinned server cert + explicit user "Permetre".
 	a.injector.SetEnabled(true)
 	a.window.SetState(clientui.StateActive, "")
-	a.monitorIdx.Store(0) // Always start on Monitor 1
+	a.monitorIdx.Store(0)
 	a.forceKeyframe.Store(true)
 	go a.streamScreen(streamCtx, conn, sid)
 	go a.syncClipboardLoop(streamCtx, conn)
@@ -504,14 +530,14 @@ func (a *clientAgent) onUserDeny() {
 		_ = a.writeJSON(conn, protocol.MsgConsentResp, protocol.ConsentRespPayload{
 			SessionID: sid,
 			Allowed:   false,
-			Reason:    "Denegat per l'usuari",
+			Reason:    a.strings.DeniedByUserReason,
 		})
 	}
 	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
 }
 
 func (a *clientAgent) onUserDisconnect() {
-	a.stopAllSessions("Desconnectat per l'usuari")
+	a.stopAllSessions(a.strings.DisconnectedByUser)
 	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
 }
 
@@ -635,7 +661,6 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 	a.lastSentFrameID.Store(0)
 	a.lastAckedFrameID.Store(0)
 
-	// Target up to ~60 FPS on fast links, bounded by 2-frame sliding-window ACK backpressure.
 	const (
 		frameInterval = 16 * time.Millisecond
 		maxInFlight   = 2
@@ -663,7 +688,6 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 	var frameSeq uint32
 
 	for ctx.Err() == nil {
-		// Sliding-window pacing: never let more than 2 frames queue in TCP buffers.
 		if int32(a.lastSentFrameID.Load()-a.lastAckedFrameID.Load()) >= maxInFlight {
 			if !timer.Stop() {
 				select {
