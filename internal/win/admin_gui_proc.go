@@ -5,6 +5,7 @@ package win
 import (
 	"fmt"
 	"strings"
+	"syscall"
 	"unsafe"
 
 	"remote-control/internal/security"
