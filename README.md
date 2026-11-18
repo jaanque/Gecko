@@ -1,50 +1,105 @@
 <div align="center">
 
+```
+ ██████╗ ███████╗ ██████╗██╗  ██╗ ██████╗ 
+██╔════╝ ██╔════╝██╔════╝██║ ██╔╝██╔═══██╗
+██║  ███╗█████╗  ██║     █████═╝ ██║   ██║
+██║   ██║██╔══╝  ██║     ██╔═██╗ ██║   ██║
+╚██████╔╝███████╗╚██████╗██║ ╚██╗╚██████╔╝
+ ╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ 
+```
+
 # 🦎 Gecko
 
-**Control i suport remot per a Windows.**  
-*Natiu · Lleuger · Segur · Codi Obert*
+**Soporte y control remoto nativo para Windows.**  
+*Ultraligero · 60 FPS DXGI GPU · Zero-Trust mTLS 1.3 · Cero dependencias · Código abierto*
 
 [![CI](https://github.com/jaanque/Gecko/actions/workflows/ci.yml/badge.svg)](https://github.com/jaanque/Gecko/actions/workflows/ci.yml)
-[![Llicència: MIT](https://img.shields.io/badge/Llicència-MIT-18181B.svg)](LICENSE)
+[![Licencia: MIT](https://img.shields.io/badge/Licencia-MIT-18181B.svg)](LICENSE)
 ![Windows](https://img.shields.io/badge/Plataforma-Windows%20(amd64%20%7C%20arm64)-0078D4.svg?logo=windows&logoColor=white)
 ![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8.svg?logo=go&logoColor=white)
-![Zero Dependencies](https://img.shields.io/badge/Dependències-0-16A34A.svg)
+![Cero Dependencias](https://img.shields.io/badge/Dependencias-0-16A34A.svg)
 
+---
+
+</div>
+
+## 🖥️ Visor Remoto
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ 🦎 Gecko Viewer ─ PC-OFICINA (1920×1080 · 60 FPS · 8 ms)          [—][□][×]│
+├────────────────────────────────────────────────────────────────────────┤
+│ [M1] [M2] [Todos] │ Calidad: [Baja] [Estándar] [● Alta] │ [📁 Archivo] │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│          ╔══════════════════════════════════════════════════╗          │
+│          ║                                                  ║          │
+│          ║        ESCRITORIO REMOTO ACELERADO (DXGI)        ║          │
+│          ║                                                  ║          │
+│          ╚══════════════════════════════════════════════════╝          │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+<div align="center">
+<sub>Visor nativo Win32: aceleración directa DirectX 11, Per-Monitor DPI v2 y portapapeles sincronizado.</sub>
 </div>
 
 ---
 
-### ✨ Característiques
+## 🛡️ Consentimiento Obligatorio
 
-| ⚡ Rendiment | 🛡️ Seguretat | 🪟 Windows Natiu |
-| :--- | :--- | :--- |
-| **GPU DXGI 60 FPS**<br/>Captura directa per maquinari | **Zero-Trust mTLS 1.3**<br/>Xifratge extrem a extrem | **Win32 Natiu Pur**<br/>Sense runtimes ni dependències |
-| **Tessel·les híbrides**<br/>Text nítid i moviment fluid | **Consentiment actiu**<br/>L'usuari autoritza el control | **DPI Awareness v2**<br/>Escalat nítid en qualsevol monitor |
-| **Multimonitor**<br/>Pantalla individual o combinada | **Revocació en un clic**<br/>Tall d'accés instantani | **Portapapers i fitxers**<br/>Eines essencials integrades |
+```text
+┌────────────────────────────────────────────────────┐
+│ 🦎 Asistencia Remota                        [—][×] │
+├────────────────────────────────────────────────────┤
+│                                                    │
+│   Un técnico solicita conectarse a su equipo:      │
+│                                                    │
+│   Operador: Soporte IT (f9bbdef02173)              │
+│   Seguridad: Cifrado mTLS 1.3 extremo a extremo    │
+│                                                    │
+│          [ ✔ PERMITIR ]      [ ✖ DENEGAR ]         │
+│                                                    │
+└────────────────────────────────────────────────────┘
+```
+<div align="center">
+<sub>Sin instalación: el usuario asistido solo hace doble clic y decide si autoriza el control.</sub>
+</div>
 
 ---
 
-### 🔗 Com funciona
+## ⚡ Comparativa
 
-Sense obrir ports al router ni configurar tallafocs: tothom es connecta de manera sortint al servidor pont.
+| Capacidad | 🦎 Gecko | Herramientas Tradicionales |
+| :--- | :---: | :---: |
+| **Instalación** | ❌ **0 MB** (Portable) | ⚠️ 50–150 MB (Instalador + drivers) |
+| **Dependencias** | ✅ **0** (Go puro + Win32) | ❌ Decenas de librerías y runtimes |
+| **Captura GPU** | ✅ **DXGI Direct 60 FPS** | ⚠️ Hooking lento / polling GDI |
+| **Privacidad** | ✅ **100% Auto-alojado** | ❌ Nubes de terceros con telemetría |
+| **Seguridad de red** | ✅ **mTLS 1.3 + Pinning** | ⚠️ Propietaria / Cerrada |
+| **Revocación** | ✅ **Instantánea en 1 clic** | ⚠️ Panel web externo |
+
+---
+
+## 🔗 Arquitectura
 
 ```mermaid
 flowchart LR
-    subgraph Client ["💻 Equip Assistit"]
-        C["<b>ClientRemot.exe</b><br/>Sense instal·lació"]
+    subgraph Client ["💻 Cliente Asistido"]
+        C["<b>ClientRemot.exe</b><br/>Portable · Sin instalación"]
     end
 
-    subgraph Relay ["🌐 Servidor Pont"]
-        R["<b>RelayServidor.exe</b><br/>mTLS 1.3 · Port 9443"]
+    subgraph Relay ["🌐 Servidor Puente"]
+        R["<b>RelayServidor.exe</b><br/>mTLS 1.3 · TCP 9443"]
     end
 
     subgraph Admin ["🎛️ Administrador"]
-        A["<b>AdminRemoto.exe</b><br/>Consola i Visor Win32"]
+        A["<b>AdminRemoto.exe</b><br/>Consola y Visor Win32"]
     end
 
-    C -- "mTLS sortint" --> R
-    A -- "mTLS sortint" --> R
+    C -- "mTLS saliente" --> R
+    A -- "mTLS saliente" --> R
 
     classDef default fill:#18181b,stroke:#3f3f46,stroke-width:1px,color:#f4f4f5;
     classDef client fill:#1e293b,stroke:#38bdf8,stroke-width:1.5px,color:#f8fafc;
@@ -55,39 +110,29 @@ flowchart LR
     class R relay;
     class A admin;
 ```
+<div align="center">
+<sub>Sin abrir puertos en clientes ni administradores: todas las conexiones son salientes hacia el Relay.</sub>
+</div>
 
 ---
 
-### 🧩 Components
+## 🚀 Inicio en 3 Pasos
 
-| Binari | Rol | Descripció |
-| :--- | :--- | :--- |
-| 🎛️ **`AdminRemoto.exe`** | Administrador | Consola de control, visor fluid a 60 FPS i generador de clients. |
-| 🌐 **`RelayServidor.exe`** | Servidor | Servidor pont mTLS, gestor de credencials i auditoria de sessions. |
-| 💻 **`ClientRemot.exe`** | Client | Executable portable sense instal·lació. Doble clic i llest. |
-
----
-
-### 🚀 Inici ràpid
-
-```sh
-# 1. Compilar executables (Go 1.22+)
-go run ./cmd/build
-
-# 2. Iniciar el servidor pont (al servidor)
-dist\RelayServidor.exe
-
-# 3. Obrir la consola de control (a l'equip d'administració)
-dist\AdminRemoto.exe
+```text
+ [1] Compilar       go run ./cmd/build       ──▶   dist/
+ [2] Servidor       dist\RelayServidor.exe   ──▶   TCP :9443 (mTLS)
+ [3] Conectar       dist\AdminRemoto.exe     ──▶   Soporte instantáneo
 ```
 
 ---
 
-### 📚 Documentació
+## 📚 Documentación
 
-| Recurs | Contingut |
-| :--- | :--- |
-| 📘 **[Guia de producció](docs/PRODUCCIO.md)** | Configuració de xarxa, desplegament, seguretat i dreceres. |
-| 🤝 **[Contribuir](CONTRIBUTING.md)** | Directrius de desenvolupament i estil de codi. |
-| 🛡️ **[Seguretat](SECURITY.md)** | Política de reporte responsable de vulnerabilitats. |
-| 📜 **[Llicència MIT](LICENSE)** | Codi obert per a ús personal i comercial. |
+<div align="center">
+
+[![Guía de Producción](https://img.shields.io/badge/📘%20Guía-Producción%20y%20Despliegue-2563EB?style=for-the-badge)](docs/PRODUCCIO.md)
+[![Contribuir](https://img.shields.io/badge/🤝%20Comunidad-Contribuir-7C3AED?style=for-the-badge)](CONTRIBUTING.md)
+[![Seguridad](https://img.shields.io/badge/🛡️%20Seguridad-Reportar-059669?style=for-the-badge)](SECURITY.md)
+[![Licencia](https://img.shields.io/badge/⚖️%20Licencia-MIT-D97706?style=for-the-badge)](LICENSE)
+
+</div>
