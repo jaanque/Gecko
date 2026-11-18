@@ -23,16 +23,13 @@ var (
 )
 
 const (
-	wsOverlappedWindow = 0x00CF0000
-	wsClipChildren     = 0x02000000
-	wsTabStop          = 0x00010000
-	wsBorder           = 0x00800000
-	wsExClientEdge     = 0x00000200
-	esAutoHScroll      = 0x0080
+	wsClipChildren = 0x02000000
+	wsTabStop      = 0x00010000
+	wsBorder       = 0x00800000
+	wsExClientEdge = 0x00000200
+	esAutoHScroll  = 0x0080
 
-	wmSetFont      = 0x0030
-	wmEraseBkgnd   = 0x0014
-	wmGetMinMaxInf = 0x0024
+	wmSetFont = 0x0030
 	enChange       = 0x0300
 	emSetCueBaner  = 0x1501
 
