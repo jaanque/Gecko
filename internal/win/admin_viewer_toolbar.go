@@ -4,7 +4,6 @@ package win
 
 import (
 	"fmt"
-	"time"
 
 	"remote-control/internal/protocol"
 )
