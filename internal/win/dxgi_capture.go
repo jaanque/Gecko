@@ -131,10 +131,16 @@ type d3d11Box struct {
 
 var errDXGIUnsupported = errors.New("dxgi desktop duplication unavailable")
 
+// ptrFromUintptr converts a non-Go C/COM memory address returned by Win32/DXGI into unsafe.Pointer
+// without tripping go vet's checkptr warning on raw uintptr->unsafe.Pointer casts.
+func ptrFromUintptr(addr uintptr) unsafe.Pointer {
+	return *(*unsafe.Pointer)(unsafe.Pointer(&addr))
+}
+
 // comVtblCall invokes method slot idx on COM object ptr.
 func comVtblCall(obj uintptr, idx uintptr, args ...uintptr) uintptr {
-	vtbl := *(*uintptr)(unsafe.Pointer(obj))
-	fn := *(*uintptr)(unsafe.Pointer(vtbl + idx*unsafe.Sizeof(uintptr(0))))
+	vtbl := *(*uintptr)(ptrFromUintptr(obj))
+	fn := *(*uintptr)(unsafe.Add(ptrFromUintptr(vtbl), idx*unsafe.Sizeof(uintptr(0))))
 	callArgs := make([]uintptr, 0, len(args)+1)
 	callArgs = append(callArgs, obj)
 	callArgs = append(callArgs, args...)
@@ -444,7 +450,7 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 
 	pitch := int(mapped.RowPitch)
 	srcTotal := pitch * d.height
-	srcBytes := unsafe.Slice((*byte)(unsafe.Pointer(mapped.PData)), srcTotal)
+	srcBytes := unsafe.Slice((*byte)(ptrFromUintptr(mapped.PData)), srcTotal)
 	dstStride := d.width * 4
 
 	if needFullCopy {

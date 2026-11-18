@@ -51,27 +51,27 @@ func Detect(defaultLang Lang) Lang {
 
 // ClientStrings holds localized text for the portable Client UI across Windows, Linux, and macOS.
 type ClientStrings struct {
-	WindowTitle          string
-	Connecting           string
-	Reconnecting         string
-	Online               string
-	ActiveSession        string
-	PromptMessage        string
-	Allow                string
-	Deny                 string
-	Disconnect           string
-	NoConfig             string
-	InvalidCert          string
-	AccessRejected       string
-	BusyReason           string
-	TimeoutReason        string
-	DeniedByUserReason   string
-	DisconnectedByUser   string
-	ClientClosedReason   string
-	WaylandNoX11Warning  string
-	WaylandXWaylandWarn  string
-	NoX11DisplayWarning  string
-	ErrorFallback        string
+	WindowTitle         string
+	Connecting          string
+	Reconnecting        string
+	Online              string
+	ActiveSession       string
+	PromptMessage       string
+	Allow               string
+	Deny                string
+	Disconnect          string
+	NoConfig            string
+	InvalidCert         string
+	AccessRejected      string
+	BusyReason          string
+	TimeoutReason       string
+	DeniedByUserReason  string
+	DisconnectedByUser  string
+	ClientClosedReason  string
+	WaylandNoX11Warning string
+	WaylandXWaylandWarn string
+	NoX11DisplayWarning string
+	ErrorFallback       string
 }
 
 // Client returns the localized ClientStrings for lang.

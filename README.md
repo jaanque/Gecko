@@ -21,8 +21,8 @@
 
 - **Sense instal·lació per a l'usuari**: un únic executable portable personalitzable amb el teu logotip i idioma (**Català**, **Español**, **English**). L'usuari només l'obre i tria **Permetre** o **Denegar**.
 - **Privacitat i seguretat reals**: connexions xifrades extrem a extrem amb certificats mutus, credencials revocables per client i consentiment explícit obligatori abans de prendre el control.
-- **Ràpid i lleuger**: escrit íntegrament en Go pur, amb captura acelerada per GPU (**DXGI Desktop Duplication**) a Windows, imatge nítida per a text i suport multimonitor.
-- **Multiplataforma de veritat**: administra des de Windows, Linux o macOS i dóna suport a equips Windows, Linux (X11 / Wayland) i macOS.
+- **Ràpid i lleuger**: escrit íntegrament en Go pur, amb captura accelerada per GPU (**DXGI Desktop Duplication**) a Windows, imatge nítida per a text i suport multimonitor.
+- **Multiplataforma de veritat**: administra des de Windows, Linux o macOS i dona suport a equips Windows, Linux (X11 / Wayland) i macOS.
 - **Fet per al suport del dia a dia**: portapapers bidireccional, enviament segur de fitxers, cerca d'equips i accions ràpides de sistema integrades.
 - **100% autoallotjat i Open Source**: desplega el teu propi servidor pont en segons i no depenguis de cap plataforma externa ni subscripció.
 

@@ -88,9 +88,9 @@ type iconInfo struct {
 // using hardware-accelerated DXGI Desktop Duplication (with automatic GDI BitBlt fallback)
 // and parallel 64x64 hybrid lossless-UI + JPEG tile encoding.
 type ScreenCapturer struct {
-	dxgi         dxgiCapturer
-	dxgiRetryAt  time.Time
-	usingDXGI    bool
+	dxgi        dxgiCapturer
+	dxgiRetryAt time.Time
+	usingDXGI   bool
 
 	hdcMem   uintptr
 	hBitmap  uintptr
