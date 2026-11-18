@@ -22,9 +22,12 @@ const (
 	ofnNoChangeDir     = 0x00000008
 	ofnExplorer        = 0x00080000
 
-	mbOK        = 0x00000000
-	mbIconError = 0x00000010
-	mbIconInfo  = 0x00000040
+	mbOK          = 0x00000000
+	mbYesNo       = 0x00000004
+	mbIconError   = 0x00000010
+	mbIconWarning = 0x00000030
+	mbIconInfo    = 0x00000040
+	idYes         = 6
 )
 
 type openFileNameW struct {
@@ -140,6 +143,40 @@ func ShowOpenLogoDialog(ownerHwnd uintptr) (string, bool) {
 		return "", false
 	}
 	return syscall.UTF16ToString(fileBuf), true
+}
+
+// ShowOpenAnyFileDialog opens the native Windows file picker for sending a file to a remote client.
+// Returns ("", false) if the user cancels.
+func ShowOpenAnyFileDialog(ownerHwnd uintptr) (string, bool) {
+	fileBuf := make([]uint16, 4096)
+	filterStr := "Todos los archivos (*.*)\x00*.*\x00\x00"
+	filterUTF16 := utf16WithNulls(filterStr)
+	titleUTF16, _ := syscall.UTF16PtrFromString("Enviar archivo al equipo remoto")
+
+	ofn := openFileNameW{
+		LStructSize:  uint32(unsafe.Sizeof(openFileNameW{})),
+		HwndOwner:    ownerHwnd,
+		LpstrFilter:  &filterUTF16[0],
+		NFilterIndex: 1,
+		LpstrFile:    &fileBuf[0],
+		NMaxFile:     uint32(len(fileBuf)),
+		LpstrTitle:   titleUTF16,
+		Flags:        ofnFileMustExist | ofnPathMustExist | ofnNoChangeDir | ofnExplorer,
+	}
+
+	ok, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
+	if ok == 0 {
+		return "", false
+	}
+	return syscall.UTF16ToString(fileBuf), true
+}
+
+// ShowConfirmBox displays a native Windows Yes/No confirmation dialog and returns true if Yes.
+func ShowConfirmBox(ownerHwnd uintptr, title, message string) bool {
+	t, _ := syscall.UTF16PtrFromString(title)
+	m, _ := syscall.UTF16PtrFromString(message)
+	r, _, _ := procMessageBoxW.Call(ownerHwnd, uintptr(unsafe.Pointer(m)), uintptr(unsafe.Pointer(t)), uintptr(mbYesNo|mbIconWarning))
+	return r == idYes
 }
 
 // ShowMessageBox displays a native Windows message box.

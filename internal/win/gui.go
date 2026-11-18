@@ -7,6 +7,8 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"remote-control/internal/clientui"
 )
 
 var (
@@ -102,25 +104,6 @@ const (
 	idBtnDisconnect = 1003
 )
 
-// ClientUIState describes the simple state machine of the client window.
-type ClientUIState int
-
-const (
-	UIStateConnecting ClientUIState = iota
-	UIStateOnline
-	UIStatePrompt
-	UIStateActive
-	UIStateError
-)
-
-// ClientCallbacks holds user action callbacks invoked from the client GUI.
-type ClientCallbacks struct {
-	OnAllow      func()
-	OnDeny       func()
-	OnDisconnect func()
-	OnClose      func()
-}
-
 type rect struct {
 	Left   int32
 	Top    int32
@@ -185,10 +168,10 @@ type flashWInfo struct {
 type ClientWindow struct {
 	hostname  string
 	logoPNG   []byte
-	callbacks ClientCallbacks
+	callbacks clientui.Callbacks
 
 	mu        sync.Mutex
-	state     ClientUIState
+	state     clientui.State
 	detail    string
 	hwnd      uintptr
 	btnAllow  uintptr
@@ -211,12 +194,12 @@ var (
 )
 
 // NewClientWindow constructs a ClientWindow instance. Call Run() to start the Win32 message loop.
-func NewClientWindow(hostname string, logoPNG []byte, cb ClientCallbacks) *ClientWindow {
+func NewClientWindow(hostname string, logoPNG []byte, cb clientui.Callbacks) *ClientWindow {
 	return &ClientWindow{
 		hostname:  hostname,
 		logoPNG:   logoPNG,
 		callbacks: cb,
-		state:     UIStateConnecting,
+		state:     clientui.StateConnecting,
 		detail:    "Connectant...",
 		dpi:       96,
 		readyCh:   make(chan struct{}),
@@ -229,7 +212,7 @@ func (w *ClientWindow) Ready() <-chan struct{} {
 }
 
 // SetState safely updates the window state from any goroutine.
-func (w *ClientWindow) SetState(st ClientUIState, detail string) {
+func (w *ClientWindow) SetState(st clientui.State, detail string) {
 	w.mu.Lock()
 	w.state = st
 	w.detail = detail
@@ -410,7 +393,7 @@ func (w *ClientWindow) applyStateToControls() {
 		return
 	}
 
-	if st == UIStatePrompt {
+	if st == clientui.StatePrompt {
 		procShowWindow.Call(btnAllow, swShowNormal)
 		procShowWindow.Call(btnDeny, swShowNormal)
 		procShowWindow.Call(btnDisc, swHide)
@@ -433,7 +416,7 @@ func (w *ClientWindow) applyStateToControls() {
 	} else {
 		procShowWindow.Call(btnAllow, swHide)
 		procShowWindow.Call(btnDeny, swHide)
-		if st == UIStateActive {
+		if st == clientui.StateActive {
 			procShowWindow.Call(btnDisc, swShowNormal)
 		} else {
 			procShowWindow.Call(btnDisc, swHide)
@@ -490,18 +473,18 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 	procSelectObject.Call(hdc, w.fontBody)
 
 	switch st {
-	case UIStatePrompt:
+	case clientui.StatePrompt:
 		procSetTextColor.Call(hdc, rgb(24, 24, 27))
 		rcMsg := rect{pad, w.scale(108), cr.Right - pad, w.scale(136)}
 		drawText(hdc, "L'administrador sol·licita controlar aquest equip.", &rcMsg, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-	case UIStateActive:
+	case clientui.StateActive:
 		drawStatusDot(hdc, pad, w.scale(158), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(21, 128, 61))
 		rcTxt := rect{pad + w.scale(18), w.scale(148), cr.Right - w.scale(164), w.scale(178)}
 		drawText(hdc, "Sessió activa", &rcTxt, dtLeft|dtSingleLn|dtVCenter)
 
-	case UIStateOnline:
+	case clientui.StateOnline:
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(63, 63, 70))
 		txt := detail
@@ -511,13 +494,13 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, txt, &rcTxt, dtLeft|dtSingleLn|dtVCenter)
 
-	case UIStateError:
+	case clientui.StateError:
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(220, 38, 38))
 		procSetTextColor.Call(hdc, rgb(185, 28, 28))
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, detail, &rcTxt, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-	default: // UIStateConnecting
+	default: // clientui.StateConnecting
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(217, 119, 6))
 		procSetTextColor.Call(hdc, rgb(82, 82, 91))
 		txt := detail

@@ -6,36 +6,57 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
+	"unicode"
 )
 
 const (
-	MaxPayloadSize        = 16 * 1024 * 1024 // 16 MiB hard cap for MsgFrame
-	MaxControlPayloadSize = 16 * 1024        // 16 KiB hard cap for JSON control messages
-	MaxListPayloadSize    = 512 * 1024       // 512 KiB hard cap for MsgClientList
-	MaxPingPayloadSize    = 64               // 64 bytes hard cap for MsgPing/MsgPong
-	HeaderSize            = 5
-	FrameHeaderSize       = 10 // frameID(4) + width(2) + height(2) + tileCount(2)
-	TileHeaderSize        = 13 // x(2) + y(2) + w(2) + h(2) + codec(1) + dataLen(4)
+	MaxPayloadSize          = 16 * 1024 * 1024 // 16 MiB hard cap for MsgFrame
+	MaxControlPayloadSize   = 16 * 1024        // 16 KiB hard cap for JSON control messages
+	MaxListPayloadSize      = 512 * 1024       // 512 KiB hard cap for MsgClientList
+	MaxPingPayloadSize      = 64               // 64 bytes hard cap for MsgPing/MsgPong
+	MaxClipboardPayloadSize = 256 * 1024       // 256 KiB hard cap for MsgClipboard
+	MaxFileChunkPayloadSize = 260 * 1024       // 256 KiB chunk data + binary header
+	FileChunkSize           = 128 * 1024       // 128 KiB per file transfer chunk
+	MaxFileTransferSize     = 50 * 1024 * 1024 // 50 MiB max file transfer
+	HeaderSize              = 5
+	FrameHeaderSize         = 10 // frameID(4) + width(2) + height(2) + tileCount(2)
+	TileHeaderSize          = 13 // x(2) + y(2) + w(2) + h(2) + codec(1) + dataLen(4)
 )
 
 // Message types.
 const (
-	MsgAuth         uint8 = 0x01
-	MsgAuthResp     uint8 = 0x02
-	MsgPing         uint8 = 0x03
-	MsgPong         uint8 = 0x04
-	MsgAdminAuth    uint8 = 0x05
-	MsgClientList   uint8 = 0x06
-	MsgConsentReq   uint8 = 0x10
-	MsgConsentResp  uint8 = 0x11
-	MsgSessionStop  uint8 = 0x12
-	MsgStreamConfig uint8 = 0x13
-	MsgAdminConnect uint8 = 0x14
-	MsgSessionEvent uint8 = 0x15
-	MsgFrame        uint8 = 0x20
-	MsgFrameAck     uint8 = 0x21
-	MsgMouse        uint8 = 0x30
-	MsgKey          uint8 = 0x31
+	MsgAuth                 uint8 = 0x01
+	MsgAuthResp             uint8 = 0x02
+	MsgPing                 uint8 = 0x03
+	MsgPong                 uint8 = 0x04
+	MsgAdminAuth            uint8 = 0x05
+	MsgClientList           uint8 = 0x06
+	MsgAdminProvisionClient uint8 = 0x07
+	MsgAdminProvisionResp   uint8 = 0x08
+	MsgAdminRevokeClient    uint8 = 0x09
+	MsgConsentReq           uint8 = 0x10
+	MsgConsentResp          uint8 = 0x11
+	MsgSessionStop          uint8 = 0x12
+	MsgStreamConfig         uint8 = 0x13
+	MsgAdminConnect         uint8 = 0x14
+	MsgSessionEvent         uint8 = 0x15
+	MsgFrame                uint8 = 0x20
+	MsgFrameAck             uint8 = 0x21
+	MsgMouse                uint8 = 0x30
+	MsgKey                  uint8 = 0x31
+	MsgClipboard            uint8 = 0x32
+	MsgSystemAction         uint8 = 0x33
+	MsgFileOffer            uint8 = 0x40
+	MsgFileAccept           uint8 = 0x41
+	MsgFileChunk            uint8 = 0x42
+	MsgFileDone             uint8 = 0x43
+)
+
+// System actions.
+const (
+	ActionCtrlAltDel = "ctrl_alt_del"
 )
 
 // Tile codecs inside MsgFrame payloads.
@@ -81,12 +102,14 @@ type MonitorInfo struct {
 type AuthPayload struct {
 	Token    string        `json:"token"`
 	Hostname string        `json:"hostname"`
+	OS       string        `json:"os,omitempty"`
+	Username string        `json:"username,omitempty"`
 	Width    int           `json:"width"`
 	Height   int           `json:"height"`
 	Monitors []MonitorInfo `json:"monitors,omitempty"`
 }
 
-// AuthRespPayload is sent by the admin in response to MsgAuth.
+// AuthRespPayload is sent by the relay in response to MsgAuth / MsgAdminAuth.
 type AuthRespPayload struct {
 	OK       bool   `json:"ok"`
 	ClientID string `json:"client_id,omitempty"`
@@ -98,10 +121,34 @@ type AdminAuthPayload struct {
 	Token string `json:"token"`
 }
 
+// AdminProvisionReqPayload requests a fresh per-client mTLS credential from the Relay.
+type AdminProvisionReqPayload struct {
+	Label string `json:"label,omitempty"`
+}
+
+// AdminProvisionRespPayload carries a freshly minted revocable client credential.
+type AdminProvisionRespPayload struct {
+	OK            bool   `json:"ok"`
+	CredentialID  string `json:"credential_id,omitempty"`
+	ClientToken   string `json:"client_token,omitempty"`
+	ClientCertDER []byte `json:"client_cert_der,omitempty"`
+	ClientKeyDER  []byte `json:"client_key_der,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+// AdminRevokeClientPayload asks the Relay to revoke a client credential and disconnect it.
+type AdminRevokeClientPayload struct {
+	CredentialID string `json:"credential_id,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+}
+
 // ClientSummary describes an online client PC reported by the Relay to Admin.
 type ClientSummary struct {
 	ID           string `json:"id"`
+	CredentialID string `json:"credential_id,omitempty"`
 	Hostname     string `json:"hostname"`
+	OS           string `json:"os,omitempty"`
+	Username     string `json:"username,omitempty"`
 	IP           string `json:"ip"`
 	Width        int    `json:"width"`
 	Height       int    `json:"height"`
@@ -152,6 +199,46 @@ type StreamConfigPayload struct {
 	Keyframe bool `json:"keyframe,omitempty"`
 }
 
+// ClipboardPayload synchronizes UTF-8 clipboard text during an active session.
+type ClipboardPayload struct {
+	Text string `json:"text"`
+}
+
+// SystemActionPayload triggers a privileged/system action on the client during an active session.
+type SystemActionPayload struct {
+	Action string `json:"action"` // e.g. ActionCtrlAltDel
+}
+
+// FileOfferPayload initiates a file transfer from Admin to Client during an active session.
+type FileOfferPayload struct {
+	TransferID string `json:"transfer_id"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	SHA256     string `json:"sha256"`
+}
+
+// FileAcceptPayload acknowledges readiness (or rejection) to receive file chunks.
+type FileAcceptPayload struct {
+	TransferID string `json:"transfer_id"`
+	Accepted   bool   `json:"accepted"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// FileDonePayload signals completion (or error) of a file transfer.
+type FileDonePayload struct {
+	TransferID string `json:"transfer_id"`
+	OK         bool   `json:"ok"`
+	SavedPath  string `json:"saved_path,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// FileChunk carries one binary chunk of a file transfer.
+type FileChunk struct {
+	TransferID string
+	Offset     uint64
+	Data       []byte
+}
+
 // MouseEvent is encoded as 8 bytes: action(1), button(1), x(2), y(2), delta(2).
 type MouseEvent struct {
 	Action uint8
@@ -167,6 +254,64 @@ type KeyEvent struct {
 	VK     uint16
 	Scan   uint16
 	Flags  uint8
+}
+
+// EncodeFileChunk serializes a FileChunk as: idLen(1) + id + offset(8) + data.
+func EncodeFileChunk(ch FileChunk) ([]byte, error) {
+	if len(ch.TransferID) == 0 || len(ch.TransferID) > 64 {
+		return nil, errors.New("invalid transfer_id length")
+	}
+	total := 1 + len(ch.TransferID) + 8 + len(ch.Data)
+	if total > MaxFileChunkPayloadSize {
+		return nil, errors.New("file chunk exceeds max payload size")
+	}
+	buf := make([]byte, total)
+	buf[0] = byte(len(ch.TransferID))
+	copy(buf[1:], ch.TransferID)
+	offPos := 1 + len(ch.TransferID)
+	binary.BigEndian.PutUint64(buf[offPos:offPos+8], ch.Offset)
+	copy(buf[offPos+8:], ch.Data)
+	return buf, nil
+}
+
+// DecodeFileChunk parses and validates a binary FileChunk payload.
+func DecodeFileChunk(b []byte) (FileChunk, error) {
+	if len(b) < 10 {
+		return FileChunk{}, errors.New("file chunk too short")
+	}
+	idLen := int(b[0])
+	if idLen == 0 || idLen > 64 || len(b) < 1+idLen+8 {
+		return FileChunk{}, errors.New("invalid file chunk header")
+	}
+	id := string(b[1 : 1+idLen])
+	offPos := 1 + idLen
+	offset := binary.BigEndian.Uint64(b[offPos : offPos+8])
+	return FileChunk{
+		TransferID: id,
+		Offset:     offset,
+		Data:       b[offPos+8:],
+	}, nil
+}
+
+// SanitizeFileName strips any directory path, traversal, and control/invalid characters.
+func SanitizeFileName(raw string) string {
+	s := strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/")
+	s = filepath.Base(s)
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) || r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' || r == '"' || r == '<' || r == '>' || r == '|' {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= 180 {
+			break
+		}
+	}
+	out := strings.TrimSpace(strings.Trim(b.String(), "."))
+	if out == "" {
+		return "archivo.bin"
+	}
+	return out
 }
 
 // EncodeFrameAck serializes a frame ID into 4 bytes.
@@ -254,13 +399,19 @@ func DecodeKey(b []byte) (KeyEvent, error) {
 func MaxPayloadForType(msgType uint8) (uint32, bool) {
 	switch msgType {
 	case MsgAuth, MsgAuthResp, MsgAdminAuth, MsgAdminConnect,
+		MsgAdminProvisionClient, MsgAdminProvisionResp, MsgAdminRevokeClient,
 		MsgConsentReq, MsgConsentResp, MsgSessionStop,
-		MsgStreamConfig, MsgSessionEvent:
+		MsgStreamConfig, MsgSessionEvent, MsgSystemAction,
+		MsgFileOffer, MsgFileAccept, MsgFileDone:
 		return MaxControlPayloadSize, true
 	case MsgClientList:
 		return MaxListPayloadSize, true
 	case MsgPing, MsgPong:
 		return MaxPingPayloadSize, true
+	case MsgClipboard:
+		return MaxClipboardPayloadSize, true
+	case MsgFileChunk:
+		return MaxFileChunkPayloadSize, true
 	case MsgFrame:
 		return MaxPayloadSize, true
 	case MsgFrameAck:

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,8 +36,12 @@ const (
 )
 
 // ServerIdentity holds the persisted Relay CA, server TLS certificate, mTLS peer certificates
-// (Admin and Client), and separate 256-bit authentication tokens.
+// (Admin and Client), per-client revocation store, and separate 256-bit authentication tokens.
 type ServerIdentity struct {
+	DataDir       string
+	IsNew         bool
+	CACert        *x509.Certificate
+	CAKey         *ecdsa.PrivateKey
 	Certificate   tls.Certificate
 	ClientCAs     *x509.CertPool
 	CertSHA256    string
@@ -46,6 +51,9 @@ type ServerIdentity struct {
 	AdminKeyDER   []byte
 	ClientCertDER []byte
 	ClientKeyDER  []byte
+
+	credMu        sync.RWMutex
+	issuedClients map[string]IssuedClient
 }
 
 // RelayProfile holds everything AdminRemoto.exe needs to connect to RelayServidor using mTLS
@@ -174,10 +182,12 @@ func LoadOrCreateIdentity(dataDir string) (*ServerIdentity, error) {
 	secretPath := filepath.Join(dataDir, "relay_secret.json")
 
 	// If any mTLS PKI artifact is missing, regenerate the complete consistent PKI bundle.
+	isNew := false
 	if !fileExists(caCertPath) || !fileExists(caKeyPath) ||
 		!fileExists(srvCertPath) || !fileExists(srvKeyPath) ||
 		!fileExists(admCertPath) || !fileExists(admKeyPath) ||
 		!fileExists(cliCertPath) || !fileExists(cliKeyPath) {
+		isNew = true
 		if err := generateMTLSBundle(caCertPath, caKeyPath, srvCertPath, srvKeyPath, admCertPath, admKeyPath, cliCertPath, cliKeyPath); err != nil {
 			return nil, fmt.Errorf("generating mTLS PKI: %w", err)
 		}
@@ -190,6 +200,18 @@ func LoadOrCreateIdentity(dataDir string) (*ServerIdentity, error) {
 	caPool := x509.NewCertPool()
 	if !caPool.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("invalid CA certificate PEM")
+	}
+	caCertDER, caKeyDER, err := readPEMKeyPairDER(caCertPath, caKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading CA key pair: %w", err)
+	}
+	caCert, err := x509.ParseCertificate(caCertDER)
+	if err != nil {
+		return nil, fmt.Errorf("parsing CA cert: %w", err)
+	}
+	caKey, err := x509.ParseECPrivateKey(caKeyDER)
+	if err != nil {
+		return nil, fmt.Errorf("parsing CA key: %w", err)
 	}
 
 	srvCert, err := tls.LoadX509KeyPair(srvCertPath, srvKeyPath)
@@ -216,7 +238,11 @@ func LoadOrCreateIdentity(dataDir string) (*ServerIdentity, error) {
 		return nil, fmt.Errorf("loading relay tokens: %w", err)
 	}
 
-	return &ServerIdentity{
+	id := &ServerIdentity{
+		DataDir:       dataDir,
+		IsNew:         isNew,
+		CACert:        caCert,
+		CAKey:         caKey,
 		Certificate:   srvCert,
 		ClientCAs:     caPool,
 		CertSHA256:    fingerprint,
@@ -226,7 +252,11 @@ func LoadOrCreateIdentity(dataDir string) (*ServerIdentity, error) {
 		AdminKeyDER:   admKeyDER,
 		ClientCertDER: cliCertDER,
 		ClientKeyDER:  cliKeyDER,
-	}, nil
+	}
+	if err := id.loadIssuedClientsLocked(); err != nil {
+		return nil, fmt.Errorf("loading issued clients: %w", err)
+	}
+	return id, nil
 }
 
 // ServerTLSConfig returns a TLS 1.3-only Mutual TLS (mTLS) server configuration that
@@ -298,25 +328,36 @@ func VerifyServerTLSConn(conn *tls.Conn, expectedSHA256Hex string) error {
 	return nil
 }
 
-// PeerRoleFromTLS inspects a live server-side mTLS connection and returns the verified
-// certificate CommonName ("admin" or "client"). Returns an error if mTLS was not verified.
-func PeerRoleFromTLS(rawConn net.Conn) (string, error) {
+// PeerIdentityFromTLS inspects a live server-side mTLS connection and returns the verified
+// role ("admin" or "client") and the verified leaf X.509 certificate.
+func PeerIdentityFromTLS(rawConn net.Conn) (string, *x509.Certificate, error) {
 	tlsConn, ok := rawConn.(*tls.Conn)
 	if !ok {
-		return "", errors.New("TLS connection required")
+		return "", nil, errors.New("TLS connection required")
 	}
 	st := tlsConn.ConnectionState()
 	if !st.HandshakeComplete || st.Version != tls.VersionTLS13 {
-		return "", errors.New("TLS 1.3 mTLS handshake required")
+		return "", nil, errors.New("TLS 1.3 mTLS handshake required")
 	}
 	if len(st.VerifiedChains) == 0 || len(st.VerifiedChains[0]) == 0 {
-		return "", errors.New("verified client certificate required")
+		return "", nil, errors.New("verified client certificate required")
 	}
-	role := st.VerifiedChains[0][0].Subject.CommonName
-	if role != RoleAdmin && role != RoleClient {
-		return "", fmt.Errorf("unknown mTLS client role: %q", role)
+	leaf := st.VerifiedChains[0][0]
+	cn := leaf.Subject.CommonName
+	if cn == RoleAdmin {
+		return RoleAdmin, leaf, nil
 	}
-	return role, nil
+	if cn == RoleClient || strings.HasPrefix(cn, clientRolePrefix) {
+		return RoleClient, leaf, nil
+	}
+	return "", nil, fmt.Errorf("unknown mTLS client role: %q", cn)
+}
+
+// PeerRoleFromTLS inspects a live server-side mTLS connection and returns the verified
+// role ("admin" or "client"). Returns an error if mTLS was not verified.
+func PeerRoleFromTLS(rawConn net.Conn) (string, error) {
+	role, _, err := PeerIdentityFromTLS(rawConn)
+	return role, err
 }
 
 // ParseDERKeyPair reconstructs a tls.Certificate from DER-encoded certificate and EC private key bytes.

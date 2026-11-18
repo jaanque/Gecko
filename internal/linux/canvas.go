@@ -7,26 +7,9 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"math"
+
+	"remote-control/internal/clientui"
 )
-
-// ClientUIState describes the state machine of the client window.
-type ClientUIState int
-
-const (
-	UIStateConnecting ClientUIState = iota
-	UIStateOnline
-	UIStatePrompt
-	UIStateActive
-	UIStateError
-)
-
-// ClientCallbacks holds user action callbacks invoked from the client GUI.
-type ClientCallbacks struct {
-	OnAllow      func()
-	OnDeny       func()
-	OnDisconnect func()
-	OnClose      func()
-}
 
 type uiRect struct {
 	x0, y0, x1, y1 int
@@ -90,17 +73,17 @@ func (c *clientCanvas) buttonRects() (allowRC, denyRC, discRC uiRect) {
 	return allowRC, denyRC, discRC
 }
 
-func (c *clientCanvas) hitTest(state ClientUIState, x, y int) uiButtonID {
+func (c *clientCanvas) hitTest(state clientui.State, x, y int) uiButtonID {
 	allowRC, denyRC, discRC := c.buttonRects()
 	switch state {
-	case UIStatePrompt:
+	case clientui.StatePrompt:
 		if allowRC.contains(x, y) {
 			return btnAllow
 		}
 		if denyRC.contains(x, y) {
 			return btnDeny
 		}
-	case UIStateActive:
+	case clientui.StateActive:
 		if discRC.contains(x, y) {
 			return btnDisconnect
 		}
@@ -108,7 +91,7 @@ func (c *clientCanvas) hitTest(state ClientUIState, x, y int) uiButtonID {
 	return btnNone
 }
 
-func (c *clientCanvas) render(hostname string, state ClientUIState, detail string, hover uiButtonID) {
+func (c *clientCanvas) render(hostname string, state clientui.State, detail string, hover uiButtonID) {
 	// Crisp white background.
 	c.fillRect(uiRect{0, 0, c.w, c.h}, color.RGBA{255, 255, 255, 255})
 
@@ -132,7 +115,7 @@ func (c *clientCanvas) render(hostname string, state ClientUIState, detail strin
 	allowRC, denyRC, discRC := c.buttonRects()
 
 	switch state {
-	case UIStatePrompt:
+	case clientui.StatePrompt:
 		c.drawTextEllipsis(pad, 110, c.w-pad*2, "L'administrador sol·licita controlar aquest equip.", 1, false, color.RGBA{24, 24, 27, 255})
 
 		allowBg := color.RGBA{24, 24, 27, 255}
@@ -147,7 +130,7 @@ func (c *clientCanvas) render(hostname string, state ClientUIState, detail strin
 		}
 		c.drawButton(denyRC, 6, denyBg, color.RGBA{212, 212, 216, 255}, color.RGBA{24, 24, 27, 255}, "Denegar")
 
-	case UIStateActive:
+	case clientui.StateActive:
 		c.drawCircle(pad+5, 164, 5, color.RGBA{22, 163, 74, 255})
 		c.drawTextEllipsis(pad+20, 156, discRC.x0-pad-28, "Sessió activa", 1, false, color.RGBA{24, 24, 27, 255})
 
@@ -161,12 +144,12 @@ func (c *clientCanvas) render(hostname string, state ClientUIState, detail strin
 		dotCol := color.RGBA{217, 119, 6, 255}
 		statusTxt := detail
 		switch state {
-		case UIStateOnline:
+		case clientui.StateOnline:
 			dotCol = color.RGBA{22, 163, 74, 255}
 			if statusTxt == "" {
 				statusTxt = "En línia"
 			}
-		case UIStateError:
+		case clientui.StateError:
 			dotCol = color.RGBA{220, 38, 38, 255}
 			if statusTxt == "" {
 				statusTxt = "Error"

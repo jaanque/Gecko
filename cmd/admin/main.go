@@ -40,6 +40,9 @@ func main() {
 		OnConnect: func(clientID string) error {
 			return relayClient.RequestConnect(clientID)
 		},
+		OnRevokeClient: func(credentialID, clientID string) error {
+			return relayClient.RevokeClient(credentialID, clientID)
+		},
 		OnCancelPending: func() {
 			relayClient.DisconnectSession("Cancelado por el administrador")
 		},
@@ -61,12 +64,22 @@ func main() {
 		OnSelectMonitor: func(monitorIndex int) {
 			relayClient.SendSelectMonitor(monitorIndex)
 		},
+		OnClipboard: func(text string) {
+			relayClient.SendClipboard(text)
+		},
+		OnSystemAction: func(action string) {
+			relayClient.SendSystemAction(action)
+		},
+		OnSendFile: func(path string) error {
+			return relayClient.SendFile(path)
+		},
 		OnGenerateClient: func(platform string, logoPNG []byte, destPath string) error {
 			tmpl := winTemplate
 			if platform == "linux" {
 				tmpl = linuxTemplate
 			}
-			built, err := relayClient.GenerateClientBinary(tmpl, logoPNG)
+			label := filepath.Base(destPath)
+			built, _, err := relayClient.GenerateClientBinaryWithLabel(tmpl, logoPNG, label)
 			if err != nil {
 				return err
 			}
@@ -89,7 +102,10 @@ func main() {
 			for _, c := range clients {
 				rows = append(rows, win.AdminClientRow{
 					ID:           c.ID,
+					CredentialID: c.CredentialID,
 					Hostname:     c.Hostname,
+					OS:           c.OS,
+					Username:     c.Username,
 					IP:           c.IP,
 					Width:        c.Width,
 					Height:       c.Height,
@@ -119,6 +135,12 @@ func main() {
 		},
 		OnLatency: func(rttMs int) {
 			window.SetLatency(rttMs)
+		},
+		OnClipboard: func(text string) {
+			window.PushClipboard(text)
+		},
+		OnFileStatus: func(name string, ok bool, detail string) {
+			window.SetFileStatus(name, ok, detail)
 		},
 	})
 

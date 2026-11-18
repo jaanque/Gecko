@@ -3,6 +3,7 @@ package security
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"strings"
 	"testing"
 )
@@ -155,5 +156,68 @@ func TestMutualTLSHandshakeAndProfileKey(t *testing.T) {
 	if badConn, err := tls.Dial("tcp", ln.Addr().String(), badPinCfg); err == nil {
 		badConn.Close()
 		t.Fatal("expected mismatched server TLS pin to be rejected")
+	}
+}
+
+func TestPerClientCredentialIssuanceAndRevocation(t *testing.T) {
+	dir := t.TempDir()
+	id, err := LoadOrCreateIdentity(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateIdentity failed: %v", err)
+	}
+	if !id.IsNew {
+		t.Fatal("expected IsNew=true on initial identity creation")
+	}
+
+	cred, err := id.IssueClientCredential("Portatil-Soporte")
+	if err != nil {
+		t.Fatalf("IssueClientCredential failed: %v", err)
+	}
+	if cred.ID == "" || len(cred.ClientToken) < 32 {
+		t.Fatalf("invalid issued credential: %+v", cred)
+	}
+
+	leaf, err := x509.ParseCertificate(cred.ClientCertDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate failed: %v", err)
+	}
+	gotID, ok := id.VerifyClientCredential(leaf, cred.ClientToken)
+	if !ok || gotID != cred.ID {
+		t.Fatalf("VerifyClientCredential failed: got (%q, %v), want (%q, true)", gotID, ok, cred.ID)
+	}
+	if _, ok := id.VerifyClientCredential(leaf, id.ClientToken); ok {
+		t.Fatal("unique client cert must not accept legacy shared token")
+	}
+
+	// Reload identity from disk: IsNew must be false and issued credential must remain valid.
+	reloaded, err := LoadOrCreateIdentity(dir)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if reloaded.IsNew {
+		t.Fatal("expected IsNew=false on reload")
+	}
+	if gotID, ok := reloaded.VerifyClientCredential(leaf, cred.ClientToken); !ok || gotID != cred.ID {
+		t.Fatalf("reloaded VerifyClientCredential failed: (%q, %v)", gotID, ok)
+	}
+
+	// Revoke and verify immediate rejection + persistence across reload.
+	if err := reloaded.RevokeClient(cred.ID); err != nil {
+		t.Fatalf("RevokeClient failed: %v", err)
+	}
+	if _, ok := reloaded.VerifyClientCredential(leaf, cred.ClientToken); ok {
+		t.Fatal("revoked client credential must be rejected")
+	}
+
+	reloaded2, err := LoadOrCreateIdentity(dir)
+	if err != nil {
+		t.Fatalf("reload2 failed: %v", err)
+	}
+	if _, ok := reloaded2.VerifyClientCredential(leaf, cred.ClientToken); ok {
+		t.Fatal("revoked client credential must remain rejected after reload")
+	}
+	list := reloaded2.ListIssuedClients()
+	if len(list) != 1 || !list[0].Revoked || list[0].Label != "Portatil-Soporte" {
+		t.Fatalf("unexpected issued list: %+v", list)
 	}
 }

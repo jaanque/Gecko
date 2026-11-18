@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"remote-control/internal/clientui"
 	"remote-control/internal/protocol"
 )
 
@@ -32,7 +33,7 @@ type InputInjector struct {
 	heldCodes    map[byte]bool
 	lastMonIdx   int
 	lastMonCheck time.Time
-	cachedBounds MonitorBounds
+	cachedBounds clientui.MonitorBounds
 }
 
 // NewInputInjector constructs a Linux XTEST InputInjector (locked/disabled by default).
@@ -291,6 +292,30 @@ func (inj *InputInjector) resolveKeycodeLocked(ev protocol.KeyEvent) byte {
 		}
 	}
 	return 0
+}
+
+// SendSystemAction triggers a supported system key sequence (e.g. Ctrl+Alt+Del) via XTEST.
+func (inj *InputInjector) SendSystemAction(action string) {
+	if !inj.enabled.Load() || action != protocol.ActionCtrlAltDel {
+		return
+	}
+	inj.mu.Lock()
+	defer inj.mu.Unlock()
+	if !inj.ensureConnLocked() {
+		return
+	}
+	ctrl := inj.resolveKeycodeLocked(protocol.KeyEvent{VK: 0xA2})
+	alt := inj.resolveKeycodeLocked(protocol.KeyEvent{VK: 0xA4})
+	del := inj.resolveKeycodeLocked(protocol.KeyEvent{VK: 0x2E, Flags: protocol.KeyFlagExtended})
+	if ctrl == 0 || alt == 0 || del == 0 {
+		return
+	}
+	inj.fakeInputLocked(xEventKeyPress, ctrl, 0, 0)
+	inj.fakeInputLocked(xEventKeyPress, alt, 0, 0)
+	inj.fakeInputLocked(xEventKeyPress, del, 0, 0)
+	inj.fakeInputLocked(xEventKeyRelease, del, 0, 0)
+	inj.fakeInputLocked(xEventKeyRelease, alt, 0, 0)
+	inj.fakeInputLocked(xEventKeyRelease, ctrl, 0, 0)
 }
 
 // ReleaseAllKeys releases any keys currently held down (called on session end).

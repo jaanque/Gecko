@@ -42,8 +42,12 @@ const (
 
 	cfUnicodeText = 13
 
-	idSrvAddr = 2010
-	idSrvKey  = 2011
+	enChange      = 0x0300
+	emSetCueBaner = 0x1501
+
+	idSrvAddr   = 2010
+	idSrvKey    = 2011
+	idSearchBox = 2012
 )
 
 const (
@@ -55,7 +59,10 @@ const (
 // AdminClientRow holds the display data for one online PC in the Admin list.
 type AdminClientRow struct {
 	ID           string
+	CredentialID string
 	Hostname     string
+	OS           string
+	Username     string
 	IP           string
 	Width        int
 	Height       int
@@ -66,6 +73,7 @@ type AdminClientRow struct {
 // AdminCallbacks connects the native desktop Admin GUI to the RelayClient.
 type AdminCallbacks struct {
 	OnConnect        func(clientID string) error
+	OnRevokeClient   func(credentialID, clientID string) error
 	OnCancelPending  func()
 	OnDisconnect     func()
 	OnMouse          func(ev protocol.MouseEvent)
@@ -73,6 +81,9 @@ type AdminCallbacks struct {
 	OnFrameAck       func(frameID uint32)
 	OnQuality        func(quality int)
 	OnSelectMonitor  func(monitorIndex int)
+	OnClipboard      func(text string)
+	OnSystemAction   func(action string)
+	OnSendFile       func(path string) error
 	OnGenerateClient func(platform string, logoPNG []byte, destPath string) error
 	OnSaveServer     func(profile security.RelayProfile) error
 	OnClose          func()
@@ -87,6 +98,8 @@ type AdminConfig struct {
 type adminHitRegion struct {
 	kind     string
 	clientID string
+	credID   string
+	hostname string
 	rc       rect
 }
 
@@ -135,7 +148,9 @@ type AdminWindow struct {
 	scrollY    int32
 	maxScrollY int32
 
-	// Native controls for "Servidor" tab
+	// Native controls for "Equipos" & "Servidor" tabs
+	ctrlSearch  uintptr
+	searchQuery string
 	ctrlSrvAddr uintptr
 	ctrlSrvKey  uintptr
 
@@ -303,6 +318,26 @@ func (a *AdminWindow) SetLatency(rttMs int) {
 	}
 }
 
+// PushClipboard forwards clipboard text received from the remote client to the active viewer.
+func (a *AdminWindow) PushClipboard(text string) {
+	a.mu.Lock()
+	v := a.viewer
+	a.mu.Unlock()
+	if v != nil {
+		v.ApplyRemoteClipboard(text)
+	}
+}
+
+// SetFileStatus forwards a file transfer progress/completion status to the active viewer.
+func (a *AdminWindow) SetFileStatus(name string, ok bool, detail string) {
+	a.mu.Lock()
+	v := a.viewer
+	a.mu.Unlock()
+	if v != nil {
+		v.SetFileStatus(name, ok, detail)
+	}
+}
+
 // Run creates the native desktop Admin window and runs the Win32 message loop until closed.
 func (a *AdminWindow) Run() error {
 	runtime.LockOSThread()
@@ -342,6 +377,9 @@ func (a *AdminWindow) Run() error {
 		OnFrameAck:      a.callbacks.OnFrameAck,
 		OnQuality:       a.callbacks.OnQuality,
 		OnSelectMonitor: a.callbacks.OnSelectMonitor,
+		OnClipboard:     a.callbacks.OnClipboard,
+		OnSystemAction:  a.callbacks.OnSystemAction,
+		OnSendFile:      a.callbacks.OnSendFile,
 		OnDisconnect:    a.callbacks.OnDisconnect,
 	})
 	a.mu.Lock()
@@ -439,6 +477,18 @@ func (a *AdminWindow) createServerControls(parent uintptr) {
 	}
 	a.mu.Unlock()
 
+	emptyU16, _ := syscall.UTF16PtrFromString("")
+	a.ctrlSearch, _, _ = procCreateWindowExW.Call(
+		wsExClientEdge, uintptr(unsafe.Pointer(editClass)), uintptr(unsafe.Pointer(emptyU16)),
+		wsChild|wsTabStop|wsBorder|esAutoHScroll,
+		0, 0, 400, uintptr(a.scale(28)),
+		parent, idSearchBox, a.hInst, 0,
+	)
+	procSendMessageW.Call(a.ctrlSearch, wmSetFont, a.fontBody, 1)
+	if cue, err := syscall.UTF16PtrFromString("Buscar por equipo, usuario, SO o IP..."); err == nil {
+		procSendMessageW.Call(a.ctrlSearch, emSetCueBaner, 1, uintptr(unsafe.Pointer(cue)))
+	}
+
 	srvAddrU16, _ := syscall.UTF16PtrFromString(initAddr)
 	a.ctrlSrvAddr, _, _ = procCreateWindowExW.Call(
 		wsExClientEdge, uintptr(unsafe.Pointer(editClass)), uintptr(unsafe.Pointer(srvAddrU16)),
@@ -484,16 +534,30 @@ func (a *AdminWindow) syncServerControls(hwnd uintptr) {
 	if a.ctrlSrvAddr == 0 {
 		return
 	}
+	var cr rect
+	procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&cr)))
+	cw := cr.Right - cr.Left
+	ch := cr.Bottom - cr.Top
+
+	if a.ctrlSearch != 0 {
+		a.mu.Lock()
+		hasClients := len(a.clients) > 0
+		a.mu.Unlock()
+		if a.activeTab == adminTabDevices && hasClients && cw > 0 {
+			pad := a.scale(20)
+			topY := a.contentTopY()
+			procSetWindowPos.Call(a.ctrlSearch, 0, uintptr(pad), uintptr(topY), uintptr(cw-pad*2), uintptr(a.scale(28)), 0)
+			procShowWindow.Call(a.ctrlSearch, swShowNormal)
+		} else {
+			procShowWindow.Call(a.ctrlSearch, swHide)
+		}
+	}
+
 	if a.activeTab != adminTabServer {
 		procShowWindow.Call(a.ctrlSrvAddr, swHide)
 		procShowWindow.Call(a.ctrlSrvKey, swHide)
 		return
 	}
-
-	var cr rect
-	procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&cr)))
-	cw := cr.Right - cr.Left
-	ch := cr.Bottom - cr.Top
 	if cw <= 0 || ch <= 0 {
 		return
 	}
@@ -707,6 +771,9 @@ func (a *AdminWindow) drawTopMenuTab(hdc uintptr, rc rect, label string, active,
 }
 
 func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, clients []AdminClientRow, hasProfile, relayOK bool, relayDetail string) {
+	if len(clients) > 0 {
+		topY += a.scale(38) // leave room for search bar
+	}
 	cardRC := rect{pad, topY, cw - pad, ch - pad}
 	if cardRC.Bottom-cardRC.Top < a.scale(140) {
 		cardRC.Bottom = cardRC.Top + a.scale(140)
@@ -756,8 +823,19 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		return
 	}
 
-	rowH := a.scale(60)
-	totalH := int32(len(clients)) * rowH
+	filtered := filterAdminClients(clients, a.searchQuery)
+	if len(filtered) == 0 {
+		a.maxScrollY = 0
+		a.scrollY = 0
+		procSelectObject.Call(memDC, a.fontBody)
+		procSetTextColor.Call(memDC, rgb(113, 113, 122))
+		emptyRC := rect{cardRC.Left + a.scale(20), listTop, cardRC.Right - a.scale(20), listBottom}
+		drawText(memDC, "Ningún equipo coincide con la búsqueda", &emptyRC, dtCenter|dtSingleLn|dtVCenter)
+		return
+	}
+
+	rowH := a.scale(62)
+	totalH := int32(len(filtered)) * rowH
 	if totalH > listH {
 		a.maxScrollY = totalH - listH
 	} else {
@@ -770,7 +848,7 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		a.scrollY = 0
 	}
 
-	for i, c := range clients {
+	for i, c := range filtered {
 		ry := listTop + int32(i)*rowH - a.scrollY
 		if ry+rowH < listTop || ry > listBottom {
 			continue
@@ -786,6 +864,28 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		}
 		rowRC := rect{cardRC.Left + 1, visTop, cardRC.Right - 1, visBot}
 
+		btnW := a.scale(86)
+		revW := a.scale(72)
+		btnH := a.scale(30)
+		btnGap := a.scale(8)
+		btnTop := ry + (rowH-btnH)/2
+
+		btnRC := rect{cardRC.Right - a.scale(16) - btnW, btnTop, cardRC.Right - a.scale(16), btnTop + btnH}
+		revRC := rect{btnRC.Left - btnGap - revW, btnTop, btnRC.Left - btnGap, btnTop + btnH}
+
+		// Register specific revoke hit region before the full row hit region so revoke clicks win.
+		revIdx := -1
+		if visBot-visTop >= a.scale(34) && c.CredentialID != "" {
+			revIdx = len(a.hits)
+			a.hits = append(a.hits, adminHitRegion{
+				kind:     "revoke",
+				clientID: c.ID,
+				credID:   c.CredentialID,
+				hostname: c.Hostname,
+				rc:       revRC,
+			})
+		}
+
 		rowIdx := -1
 		if c.Status == "online" {
 			rowIdx = len(a.hits)
@@ -795,7 +895,7 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		if rowIdx >= 0 && a.hoverIdx == rowIdx {
 			fillSolidRect(memDC, rowRC, rgb(250, 250, 250))
 		}
-		if i < len(clients)-1 && ry+rowH <= listBottom {
+		if i < len(filtered)-1 && ry+rowH <= listBottom {
 			drawLine(memDC, cardRC.Left+a.scale(16), ry+rowH-1, cardRC.Right-a.scale(16), ry+rowH-1, rgb(244, 244, 245))
 		}
 		if visBot-visTop < a.scale(34) {
@@ -816,31 +916,42 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		dotSz := a.scale(9)
 		drawStatusDot(memDC, cardRC.Left+a.scale(18), ry+(rowH-dotSz)/2, dotSz, dotColor)
 
-		btnW := a.scale(90)
-		btnH := a.scale(30)
-		btnRC := rect{cardRC.Right - a.scale(18) - btnW, ry + (rowH-btnH)/2, cardRC.Right - a.scale(18), ry + (rowH+btnH)/2}
-
-		statusW := a.scale(116)
-		statusRC := rect{btnRC.Left - a.scale(12) - statusW, ry, btnRC.Left - a.scale(12), ry + rowH}
+		statusRight := btnRC.Left - a.scale(12)
+		if revIdx >= 0 {
+			statusRight = revRC.Left - a.scale(12)
+		}
+		statusW := a.scale(88)
+		statusRC := rect{statusRight - statusW, ry, statusRight, ry + rowH}
 
 		textLeft := cardRC.Left + a.scale(38)
 		textRight := statusRC.Left - a.scale(10)
 
+		titleLine := c.Hostname
+		if badge := osDisplayBadge(c.OS); badge != "" {
+			titleLine = fmt.Sprintf("%s  [%s]", c.Hostname, badge)
+		}
 		procSelectObject.Call(memDC, a.fontRow)
 		procSetTextColor.Call(memDC, rgb(24, 24, 27))
 		nameRC := rect{textLeft, ry + a.scale(10), textRight, ry + a.scale(32)}
-		drawText(memDC, c.Hostname, &nameRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+		drawText(memDC, titleLine, &nameRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-		meta := c.IP
+		metaParts := make([]string, 0, 4)
+		if c.Username != "" {
+			metaParts = append(metaParts, c.Username)
+		}
+		if c.IP != "" {
+			metaParts = append(metaParts, c.IP)
+		}
 		if c.Width > 0 && c.Height > 0 {
-			meta = fmt.Sprintf("%s · %d×%d", c.IP, c.Width, c.Height)
+			metaParts = append(metaParts, fmt.Sprintf("%d×%d", c.Width, c.Height))
 		}
 		if c.MonitorCount > 1 {
-			meta = fmt.Sprintf("%s · %d monitores", meta, c.MonitorCount)
+			metaParts = append(metaParts, fmt.Sprintf("%d monitores", c.MonitorCount))
 		}
+		meta := strings.Join(metaParts, " · ")
 		procSelectObject.Call(memDC, a.fontMono)
 		procSetTextColor.Call(memDC, rgb(113, 113, 122))
-		metaRC := rect{textLeft, ry + a.scale(32), textRight, ry + a.scale(50)}
+		metaRC := rect{textLeft, ry + a.scale(33), textRight, ry + a.scale(52)}
 		drawText(memDC, meta, &metaRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 		procSelectObject.Call(memDC, a.fontBody)
@@ -848,6 +959,13 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		drawText(memDC, statusLabel, &statusRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 		procSelectObject.Call(memDC, a.fontBtn)
+		if revIdx >= 0 {
+			rBg := rgb(255, 255, 255)
+			if a.hoverIdx == revIdx {
+				rBg = rgb(254, 242, 242)
+			}
+			drawFlatButton(memDC, revRC, a.scale(5), rBg, rgb(254, 202, 202), rgb(185, 28, 28), "Revocar")
+		}
 		if c.Status == "online" {
 			bBg := rgb(255, 255, 255)
 			if rowIdx >= 0 && a.hoverIdx == rowIdx {
@@ -857,6 +975,36 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		} else {
 			drawFlatButton(memDC, btnRC, a.scale(5), rgb(250, 250, 250), rgb(228, 228, 231), rgb(161, 161, 170), "Conectar")
 		}
+	}
+}
+
+func filterAdminClients(clients []AdminClientRow, query string) []AdminClientRow {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return clients
+	}
+	out := make([]AdminClientRow, 0, len(clients))
+	for _, c := range clients {
+		if strings.Contains(strings.ToLower(c.Hostname), q) ||
+			strings.Contains(strings.ToLower(c.Username), q) ||
+			strings.Contains(strings.ToLower(c.OS), q) ||
+			strings.Contains(strings.ToLower(c.IP), q) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func osDisplayBadge(osName string) string {
+	switch strings.ToLower(osName) {
+	case "windows":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	case "macos":
+		return "macOS"
+	default:
+		return ""
 	}
 }
 
@@ -1102,6 +1250,19 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 		a.syncServerControls(hwnd)
 		procInvalidateRect.Call(hwnd, 0, 0)
 
+	case "revoke":
+		if a.callbacks.OnRevokeClient != nil {
+			msg := fmt.Sprintf("¿Revocar el acceso del equipo %s?\n\nSe desconectará inmediatamente y ese ejecutable no podrá volver a conectarse.", hit.hostname)
+			if ShowConfirmBox(hwnd, "Revocar cliente", msg) {
+				credID, cid := hit.credID, hit.clientID
+				go func() {
+					if err := a.callbacks.OnRevokeClient(credID, cid); err != nil {
+						a.NotifyError(err.Error())
+					}
+				}()
+			}
+		}
+
 	case "row":
 		cid := hit.clientID
 		if a.callbacks.OnConnect != nil {
@@ -1232,6 +1393,16 @@ func adminWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			mmi.PtMinTrackSize.Y = a.scale(420)
 		}
 		return 0
+
+	case wmCommand:
+		id := uint16(wParam & 0xFFFF)
+		code := uint16((wParam >> 16) & 0xFFFF)
+		if id == idSearchBox && code == enChange {
+			a.searchQuery = getControlText(a.ctrlSearch)
+			a.scrollY = 0
+			procInvalidateRect.Call(hwnd, 0, 0)
+			return 0
+		}
 
 	case wmSize, wmAdminRefresh:
 		a.syncServerControls(hwnd)
@@ -1381,7 +1552,17 @@ func readTextFromClipboard(hwnd uintptr) string {
 	defer procGlobalUnlock.Call(hMem)
 
 	ptr := *(*unsafe.Pointer)(unsafe.Pointer(&locked))
-	u16 := unsafe.Slice((*uint16)(ptr), 4096)
+	maxUnits := maxClipUTF16Len
+	if sz, _, _ := procGlobalSize.Call(hMem); sz > 0 {
+		units := int(sz / 2)
+		if units < maxUnits {
+			maxUnits = units
+		}
+	}
+	if maxUnits <= 0 {
+		return ""
+	}
+	u16 := unsafe.Slice((*uint16)(ptr), maxUnits)
 	end := 0
 	for end < len(u16) && u16[end] != 0 {
 		end++

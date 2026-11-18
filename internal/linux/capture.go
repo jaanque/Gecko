@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"remote-control/internal/clientui"
 	"remote-control/internal/video"
 )
 
@@ -25,7 +26,7 @@ type ScreenCapturer struct {
 
 	lastMonIdx   int
 	lastMonCheck time.Time
-	cachedBounds MonitorBounds
+	cachedBounds clientui.MonitorBounds
 
 	encoder *video.TileEncoder
 }

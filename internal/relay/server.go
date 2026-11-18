@@ -2,6 +2,7 @@ package relay
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"log"
@@ -18,7 +19,11 @@ import (
 
 const (
 	maxConcurrentHandshakes = 64
+	maxHandshakesPerIP      = 4
+	ipRateWindow            = 10 * time.Second
+	ipMaxConnsPerWindow     = 30
 	maxHostnameRunes        = 64
+	maxUsernameRunes        = 64
 	maxReportedMonitors     = 16
 )
 
@@ -44,7 +49,10 @@ func (p *peerConn) writeJSON(msgType uint8, v any) error {
 type clientPeer struct {
 	peerConn
 	id           string
+	credentialID string
 	hostname     string
+	os           string
+	username     string
 	ip           string
 	width        int
 	height       int
@@ -61,16 +69,96 @@ type adminPeer struct {
 }
 
 type bridgeSession struct {
-	id       string
-	clientID string
-	admin    *adminPeer
-	active   bool
+	id        string
+	clientID  string
+	hostname  string
+	admin     *adminPeer
+	active    bool
+	startedAt time.Time
+}
+
+type ipBucket struct {
+	inflight int
+	stamps   []time.Time
+}
+
+type ipLimiter struct {
+	mu          sync.Mutex
+	maxInflight int
+	maxPerWin   int
+	window      time.Duration
+	buckets     map[string]*ipBucket
+	lastPrune   time.Time
+}
+
+func newIPLimiter(maxInflight, maxPerWin int, window time.Duration) *ipLimiter {
+	return &ipLimiter{
+		maxInflight: maxInflight,
+		maxPerWin:   maxPerWin,
+		window:      window,
+		buckets:     make(map[string]*ipBucket),
+		lastPrune:   time.Now(),
+	}
+}
+
+func (l *ipLimiter) acquire(ip string) bool {
+	if ip == "" {
+		return true
+	}
+	now := time.Now()
+	cutoff := now.Add(-l.window)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if now.Sub(l.lastPrune) > l.window*3 && len(l.buckets) > 256 {
+		for k, b := range l.buckets {
+			if b.inflight == 0 && (len(b.stamps) == 0 || b.stamps[len(b.stamps)-1].Before(cutoff)) {
+				delete(l.buckets, k)
+			}
+		}
+		l.lastPrune = now
+	}
+
+	b := l.buckets[ip]
+	if b == nil {
+		b = &ipBucket{}
+		l.buckets[ip] = b
+	}
+
+	// Prune timestamps outside the sliding window.
+	keep := b.stamps[:0]
+	for _, ts := range b.stamps {
+		if ts.After(cutoff) {
+			keep = append(keep, ts)
+		}
+	}
+	b.stamps = keep
+
+	if b.inflight >= l.maxInflight || len(b.stamps) >= l.maxPerWin {
+		return false
+	}
+	b.inflight++
+	b.stamps = append(b.stamps, now)
+	return true
+}
+
+func (l *ipLimiter) release(ip string) {
+	if ip == "" {
+		return
+	}
+	l.mu.Lock()
+	if b := l.buckets[ip]; b != nil && b.inflight > 0 {
+		b.inflight--
+	}
+	l.mu.Unlock()
 }
 
 // Server acts as a secure mTLS 1.3 bridge between Admin apps and Client PCs across different networks.
 type Server struct {
 	identity     *security.ServerIdentity
 	handshakeSem chan struct{}
+	ipLimit      *ipLimiter
 
 	mu       sync.RWMutex
 	clients  map[string]*clientPeer
@@ -83,9 +171,49 @@ func NewServer(identity *security.ServerIdentity) *Server {
 	return &Server{
 		identity:     identity,
 		handshakeSem: make(chan struct{}, maxConcurrentHandshakes),
+		ipLimit:      newIPLimiter(maxHandshakesPerIP, ipMaxConnsPerWindow, ipRateWindow),
 		clients:      make(map[string]*clientPeer),
 		admins:       make(map[string]*adminPeer),
 		sessions:     make(map[string]*bridgeSession),
+	}
+}
+
+// SetRateLimits overrides per-IP connection rate limits (useful for tests or custom deployments).
+func (s *Server) SetRateLimits(maxInflight, maxPerWindow int, window time.Duration) {
+	s.ipLimit = newIPLimiter(maxInflight, maxPerWindow, window)
+}
+
+// Close gracefully notifies active peers and closes all live client and admin connections.
+func (s *Server) Close() {
+	s.mu.Lock()
+	clients := make([]*clientPeer, 0, len(s.clients))
+	for _, c := range s.clients {
+		clients = append(clients, c)
+	}
+	admins := make([]*adminPeer, 0, len(s.admins))
+	for _, a := range s.admins {
+		admins = append(admins, a)
+	}
+	s.mu.Unlock()
+
+	for _, c := range clients {
+		if c.sessionID != "" {
+			_ = c.writeJSON(protocol.MsgSessionStop, protocol.SessionStopPayload{
+				SessionID: c.sessionID,
+				Reason:    "Servidor puente detenido",
+			})
+		}
+		_ = c.conn.Close()
+	}
+	for _, a := range admins {
+		if a.sessionID != "" {
+			_ = a.writeJSON(protocol.MsgSessionEvent, protocol.SessionEventPayload{
+				Event:     "ended",
+				SessionID: a.sessionID,
+				Reason:    "Servidor puente detenido",
+			})
+		}
+		_ = a.conn.Close()
 	}
 }
 
@@ -99,22 +227,30 @@ func (s *Server) Serve(ln net.Listener) error {
 			}
 			return err
 		}
+		ip := remoteIP(conn)
+		if !s.ipLimit.acquire(ip) {
+			log.Printf("[seguridad] límite de conexiones por IP alcanzado: %s", ip)
+			_ = conn.Close()
+			continue
+		}
 		select {
 		case s.handshakeSem <- struct{}{}:
-			go s.handleConn(conn)
+			go s.handleConn(conn, ip)
 		default:
+			s.ipLimit.release(ip)
 			_ = conn.Close()
 		}
 	}
 }
 
-func (s *Server) handleConn(rawConn net.Conn) {
+func (s *Server) handleConn(rawConn net.Conn, ip string) {
 	defer rawConn.Close()
 	semReleased := false
 	releaseSem := func() {
 		if !semReleased {
 			semReleased = true
 			<-s.handshakeSem
+			s.ipLimit.release(ip)
 		}
 	}
 	defer releaseSem()
@@ -133,7 +269,7 @@ func (s *Server) handleConn(rawConn net.Conn) {
 		return
 	}
 	// Verify Mutual TLS 1.3 client certificate and extract cryptographically signed role ("admin" or "client").
-	peerRole, err := security.PeerRoleFromTLS(tlsConn)
+	peerRole, leafCert, err := security.PeerIdentityFromTLS(tlsConn)
 	if err != nil {
 		return
 	}
@@ -149,10 +285,11 @@ func (s *Server) handleConn(rawConn net.Conn) {
 
 	switch {
 	case msgType == protocol.MsgAuth && peerRole == security.RoleClient:
-		s.serveClient(rawConn, payload)
+		s.serveClient(rawConn, leafCert, payload)
 	case msgType == protocol.MsgAdminAuth && peerRole == security.RoleAdmin:
 		s.serveAdmin(rawConn, payload)
 	default:
+		log.Printf("[seguridad] rol mTLS no autorizado desde %s (role=%s msg=0x%02X)", ip, peerRole, msgType)
 		_ = rawConn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 		_ = protocol.WriteJSON(rawConn, protocol.MsgAuthResp, protocol.AuthRespPayload{
 			OK:    false,
@@ -161,16 +298,18 @@ func (s *Server) handleConn(rawConn net.Conn) {
 	}
 }
 
-func (s *Server) serveClient(rawConn net.Conn, payload []byte) {
+func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, payload []byte) {
 	var auth protocol.AuthPayload
 	if err := json.Unmarshal(payload, &auth); err != nil {
 		return
 	}
-	if !security.ConstantTimeTokenEqual(auth.Token, s.identity.ClientToken) {
+	credID, ok := s.identity.VerifyClientCredential(leafCert, auth.Token)
+	if !ok {
+		log.Printf("[seguridad] cliente rechazado desde %s (cert CN=%q)", remoteIP(rawConn), leafCert.Subject.CommonName)
 		_ = rawConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_ = protocol.WriteJSON(rawConn, protocol.MsgAuthResp, protocol.AuthRespPayload{
 			OK:    false,
-			Error: "token de cliente inválido",
+			Error: "credencial de cliente inválida o revocada",
 		})
 		return
 	}
@@ -181,10 +320,13 @@ func (s *Server) serveClient(rawConn net.Conn, payload []byte) {
 	}
 
 	ip := remoteIP(rawConn)
-	hostname := sanitizeHostname(auth.Hostname)
+	hostname := sanitizeText(auth.Hostname, maxHostnameRunes)
 	if hostname == "" {
 		hostname = "EQUIPO-" + clientID[:4]
 	}
+	osName := sanitizeOS(auth.OS)
+	username := sanitizeText(auth.Username, maxUsernameRunes)
+
 	monCount := len(auth.Monitors)
 	if monCount < 1 {
 		monCount = 1
@@ -203,7 +345,10 @@ func (s *Server) serveClient(rawConn net.Conn, payload []byte) {
 	cp := &clientPeer{
 		peerConn:     peerConn{conn: rawConn},
 		id:           clientID,
+		credentialID: credID,
 		hostname:     hostname,
+		os:           osName,
+		username:     username,
 		ip:           ip,
 		width:        width,
 		height:       height,
@@ -221,12 +366,12 @@ func (s *Server) serveClient(rawConn net.Conn, payload []byte) {
 	s.mu.Lock()
 	s.clients[clientID] = cp
 	s.mu.Unlock()
-	log.Printf("[cliente] conectado: %s (%s) id=%s", cp.hostname, cp.ip, cp.id)
+	log.Printf("[cliente] conectado: %s os=%s user=%s (%s) id=%s cred=%s", cp.hostname, cp.os, cp.username, cp.ip, cp.id, cp.credentialID)
 	s.broadcastClientList()
 
 	defer func() {
 		s.unregisterClient(cp)
-		log.Printf("[cliente] desconectado: %s (%s)", cp.hostname, cp.ip)
+		log.Printf("[cliente] desconectado: %s (%s) id=%s", cp.hostname, cp.ip, cp.id)
 	}()
 
 	for {
@@ -262,6 +407,30 @@ func (s *Server) serveClient(rawConn net.Conn, payload []byte) {
 			if adm := s.activeAdminForClient(cp); adm != nil {
 				_ = adm.writeMessage(protocol.MsgFrame, data)
 			}
+
+		case protocol.MsgClipboard:
+			var clip protocol.ClipboardPayload
+			if json.Unmarshal(data, &clip) == nil {
+				if adm := s.activeAdminForClient(cp); adm != nil {
+					_ = adm.writeMessage(protocol.MsgClipboard, data)
+				}
+			}
+
+		case protocol.MsgFileAccept:
+			var fa protocol.FileAcceptPayload
+			if json.Unmarshal(data, &fa) == nil {
+				if adm := s.activeAdminForClient(cp); adm != nil {
+					_ = adm.writeMessage(protocol.MsgFileAccept, data)
+				}
+			}
+
+		case protocol.MsgFileDone:
+			var fd protocol.FileDonePayload
+			if json.Unmarshal(data, &fd) == nil {
+				if adm := s.activeAdminForClient(cp); adm != nil {
+					_ = adm.writeMessage(protocol.MsgFileDone, data)
+				}
+			}
 		}
 	}
 }
@@ -272,6 +441,7 @@ func (s *Server) serveAdmin(rawConn net.Conn, payload []byte) {
 		return
 	}
 	if !security.ConstantTimeTokenEqual(auth.Token, s.identity.AdminToken) {
+		log.Printf("[seguridad] token de administrador rechazado desde %s", remoteIP(rawConn))
 		_ = rawConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_ = protocol.WriteJSON(rawConn, protocol.MsgAuthResp, protocol.AuthRespPayload{
 			OK:    false,
@@ -311,7 +481,7 @@ func (s *Server) serveAdmin(rawConn net.Conn, payload []byte) {
 		s.mu.Lock()
 		delete(s.admins, adminID)
 		s.mu.Unlock()
-		log.Printf("[admin] desconectado (%s)", ap.ip)
+		log.Printf("[admin] desconectado (%s) id=%s", ap.ip, ap.id)
 	}()
 
 	for {
@@ -338,6 +508,17 @@ func (s *Server) serveAdmin(rawConn net.Conn, payload []byte) {
 			var req protocol.AdminConnectPayload
 			if json.Unmarshal(data, &req) == nil && req.ClientID != "" {
 				s.handleAdminConnect(ap, req.ClientID)
+			}
+
+		case protocol.MsgAdminProvisionClient:
+			var req protocol.AdminProvisionReqPayload
+			_ = json.Unmarshal(data, &req)
+			s.handleAdminProvisionClient(ap, req)
+
+		case protocol.MsgAdminRevokeClient:
+			var req protocol.AdminRevokeClientPayload
+			if json.Unmarshal(data, &req) == nil {
+				s.handleAdminRevokeClient(ap, req)
 			}
 
 		case protocol.MsgSessionStop:
@@ -377,7 +558,110 @@ func (s *Server) serveAdmin(rawConn net.Conn, payload []byte) {
 					_ = cp.writeMessage(mType, data)
 				}
 			}
+
+		case protocol.MsgClipboard:
+			var clip protocol.ClipboardPayload
+			if json.Unmarshal(data, &clip) == nil {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
+
+		case protocol.MsgSystemAction:
+			var sa protocol.SystemActionPayload
+			if json.Unmarshal(data, &sa) == nil && sa.Action != "" {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
+
+		case protocol.MsgFileOffer:
+			var fo protocol.FileOfferPayload
+			if json.Unmarshal(data, &fo) == nil && fo.TransferID != "" && fo.Size >= 0 && fo.Size <= protocol.MaxFileTransferSize {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
+
+		case protocol.MsgFileChunk:
+			if _, err := protocol.DecodeFileChunk(data); err == nil {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
+
+		case protocol.MsgFileDone:
+			var fd protocol.FileDonePayload
+			if json.Unmarshal(data, &fd) == nil && fd.TransferID != "" {
+				if cp := s.activeClientForAdmin(ap); cp != nil {
+					_ = cp.writeMessage(mType, data)
+				}
+			}
 		}
+	}
+}
+
+func (s *Server) handleAdminProvisionClient(ap *adminPeer, req protocol.AdminProvisionReqPayload) {
+	cred, err := s.identity.IssueClientCredential(req.Label)
+	if err != nil {
+		_ = ap.writeJSON(protocol.MsgAdminProvisionResp, protocol.AdminProvisionRespPayload{
+			OK:    false,
+			Error: err.Error(),
+		})
+		return
+	}
+	log.Printf("[auditoria] admin=%s (%s) emitió credencial de cliente id=%s label=%q", ap.id, ap.ip, cred.ID, cred.Label)
+	_ = ap.writeJSON(protocol.MsgAdminProvisionResp, protocol.AdminProvisionRespPayload{
+		OK:            true,
+		CredentialID:  cred.ID,
+		ClientToken:   cred.ClientToken,
+		ClientCertDER: cred.ClientCertDER,
+		ClientKeyDER:  cred.ClientKeyDER,
+	})
+}
+
+func (s *Server) handleAdminRevokeClient(ap *adminPeer, req protocol.AdminRevokeClientPayload) {
+	credID := strings.TrimSpace(req.CredentialID)
+	if credID == "" && req.ClientID != "" {
+		s.mu.RLock()
+		if cp, ok := s.clients[req.ClientID]; ok {
+			credID = cp.credentialID
+		}
+		s.mu.RUnlock()
+	}
+	if credID == "" {
+		_ = ap.writeJSON(protocol.MsgSessionEvent, protocol.SessionEventPayload{
+			Event:  "error",
+			Reason: "No se encontró la credencial del equipo a revocar.",
+		})
+		return
+	}
+	if err := s.identity.RevokeClient(credID); err != nil {
+		_ = ap.writeJSON(protocol.MsgSessionEvent, protocol.SessionEventPayload{
+			Event:  "error",
+			Reason: "No se pudo revocar la credencial: " + err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[auditoria] admin=%s (%s) revocó credencial=%s", ap.id, ap.ip, credID)
+
+	// Immediately disconnect all live clients using the revoked credential.
+	s.mu.RLock()
+	var victims []*clientPeer
+	for _, cp := range s.clients {
+		if cp.credentialID == credID {
+			victims = append(victims, cp)
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, cp := range victims {
+		_ = cp.writeJSON(protocol.MsgSessionStop, protocol.SessionStopPayload{
+			SessionID: cp.sessionID,
+			Reason:    "Credencial revocada por el administrador",
+		})
+		_ = cp.conn.Close()
 	}
 }
 
@@ -414,11 +698,14 @@ func (s *Server) handleAdminConnect(ap *adminPeer, clientID string) {
 	s.sessions[sid] = &bridgeSession{
 		id:       sid,
 		clientID: cp.id,
+		hostname: cp.hostname,
 		admin:    ap,
 		active:   false,
 	}
 	hostname := cp.hostname
 	s.mu.Unlock()
+
+	log.Printf("[auditoria] sesión solicitada sid=%s admin=%s (%s) -> cliente=%s (%s)", sid, ap.id, ap.ip, hostname, cp.ip)
 
 	if err := cp.writeJSON(protocol.MsgConsentReq, protocol.ConsentReqPayload{
 		SessionID:  sid,
@@ -454,6 +741,7 @@ func (s *Server) handleConsentResp(cp *clientPeer, resp protocol.ConsentRespPayl
 
 	if resp.Allowed {
 		sess.active = true
+		sess.startedAt = time.Now()
 		cp.status = "active"
 	} else {
 		cp.status = "online"
@@ -466,6 +754,7 @@ func (s *Server) handleConsentResp(cp *clientPeer, resp protocol.ConsentRespPayl
 	s.mu.Unlock()
 
 	if resp.Allowed {
+		log.Printf("[auditoria] sesión iniciada sid=%s admin=%s cliente=%s", resp.SessionID, adm.id, hostname)
 		_ = adm.writeJSON(protocol.MsgSessionEvent, protocol.SessionEventPayload{
 			Event:        "started",
 			SessionID:    resp.SessionID,
@@ -480,6 +769,7 @@ func (s *Server) handleConsentResp(cp *clientPeer, resp protocol.ConsentRespPayl
 		if reason == "" {
 			reason = "Solicitud denegada por el usuario."
 		}
+		log.Printf("[auditoria] sesión denegada sid=%s cliente=%s motivo=%q", resp.SessionID, hostname, reason)
 		_ = adm.writeJSON(protocol.MsgSessionEvent, protocol.SessionEventPayload{
 			Event:     "denied",
 			SessionID: resp.SessionID,
@@ -494,6 +784,7 @@ func (s *Server) handleConsentResp(cp *clientPeer, resp protocol.ConsentRespPayl
 func (s *Server) handleClientSessionStop(cp *clientPeer, stop protocol.SessionStopPayload) {
 	var adm *adminPeer
 	var sid, hostname string
+	var startedAt time.Time
 
 	s.mu.Lock()
 	sid = cp.sessionID
@@ -501,6 +792,7 @@ func (s *Server) handleClientSessionStop(cp *clientPeer, stop protocol.SessionSt
 		if sess, ok := s.sessions[sid]; ok {
 			adm = sess.admin
 			hostname = cp.hostname
+			startedAt = sess.startedAt
 			if adm.sessionID == sid {
 				adm.sessionID = ""
 			}
@@ -516,6 +808,7 @@ func (s *Server) handleClientSessionStop(cp *clientPeer, stop protocol.SessionSt
 		if reason == "" {
 			reason = "Sesión finalizada por el equipo remoto."
 		}
+		logSessionEnded(sid, hostname, startedAt, reason)
 		_ = adm.writeJSON(protocol.MsgSessionEvent, protocol.SessionEventPayload{
 			Event:     "ended",
 			SessionID: sid,
@@ -529,6 +822,7 @@ func (s *Server) handleClientSessionStop(cp *clientPeer, stop protocol.SessionSt
 func (s *Server) unregisterClient(cp *clientPeer) {
 	var adm *adminPeer
 	var sid, hostname string
+	var startedAt time.Time
 
 	s.mu.Lock()
 	delete(s.clients, cp.id)
@@ -537,6 +831,7 @@ func (s *Server) unregisterClient(cp *clientPeer) {
 			adm = sess.admin
 			sid = sess.id
 			hostname = cp.hostname
+			startedAt = sess.startedAt
 			if adm.sessionID == sid {
 				adm.sessionID = ""
 			}
@@ -546,6 +841,7 @@ func (s *Server) unregisterClient(cp *clientPeer) {
 	s.mu.Unlock()
 
 	if adm != nil {
+		logSessionEnded(sid, hostname, startedAt, "El equipo se ha desconectado.")
 		_ = adm.writeJSON(protocol.MsgSessionEvent, protocol.SessionEventPayload{
 			Event:     "ended",
 			SessionID: sid,
@@ -558,13 +854,16 @@ func (s *Server) unregisterClient(cp *clientPeer) {
 
 func (s *Server) endAdminSession(ap *adminPeer, reason string) {
 	var cp *clientPeer
-	var sid string
+	var sid, hostname string
+	var startedAt time.Time
 
 	s.mu.Lock()
 	sid = ap.sessionID
 	if sid != "" {
 		ap.sessionID = ""
 		if sess, ok := s.sessions[sid]; ok {
+			hostname = sess.hostname
+			startedAt = sess.startedAt
 			if c, exists := s.clients[sess.clientID]; exists && c.sessionID == sid {
 				c.sessionID = ""
 				c.status = "online"
@@ -576,11 +875,21 @@ func (s *Server) endAdminSession(ap *adminPeer, reason string) {
 	s.mu.Unlock()
 
 	if cp != nil {
+		logSessionEnded(sid, hostname, startedAt, reason)
 		_ = cp.writeJSON(protocol.MsgSessionStop, protocol.SessionStopPayload{
 			SessionID: sid,
 			Reason:    reason,
 		})
 		s.broadcastClientList()
+	}
+}
+
+func logSessionEnded(sid, hostname string, startedAt time.Time, reason string) {
+	if !startedAt.IsZero() {
+		dur := time.Since(startedAt).Round(time.Second)
+		log.Printf("[auditoria] sesión finalizada sid=%s cliente=%s duracion=%s motivo=%q", sid, hostname, dur, reason)
+	} else {
+		log.Printf("[auditoria] solicitud cancelada sid=%s cliente=%s motivo=%q", sid, hostname, reason)
 	}
 }
 
@@ -613,7 +922,10 @@ func (s *Server) snapshotClientsLocked() []protocol.ClientSummary {
 	for _, c := range s.clients {
 		out = append(out, protocol.ClientSummary{
 			ID:           c.id,
+			CredentialID: c.credentialID,
 			Hostname:     c.hostname,
+			OS:           c.os,
+			Username:     c.username,
 			IP:           c.ip,
 			Width:        c.width,
 			Height:       c.height,
@@ -652,7 +964,7 @@ func remoteIP(conn net.Conn) string {
 	return host
 }
 
-func sanitizeHostname(raw string) string {
+func sanitizeText(raw string, maxRunes int) string {
 	var b strings.Builder
 	count := 0
 	for _, r := range strings.TrimSpace(raw) {
@@ -661,9 +973,22 @@ func sanitizeHostname(raw string) string {
 		}
 		b.WriteRune(r)
 		count++
-		if count >= maxHostnameRunes {
+		if count >= maxRunes {
 			break
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func sanitizeOS(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "windows":
+		return "windows"
+	case "linux":
+		return "linux"
+	case "darwin", "macos":
+		return "macos"
+	default:
+		return ""
+	}
 }

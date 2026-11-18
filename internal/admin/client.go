@@ -2,11 +2,14 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -30,6 +33,8 @@ type RelayEvents struct {
 	OnSessionError   func(reason string)
 	OnFrame          func(sessionID string, frameData []byte)
 	OnLatency        func(rttMs int)
+	OnClipboard      func(text string)
+	OnFileStatus     func(name string, ok bool, detail string)
 }
 
 // RelayClient maintains an outbound TLS 1.3 connection from AdminRemoto.exe to RelayServidor.
@@ -45,12 +50,21 @@ type RelayClient struct {
 	activeSession string
 	loopGen       uint64
 	loopCancel    context.CancelFunc
+
+	provMu sync.Mutex
+	provCh chan protocol.AdminProvisionRespPayload
+
+	fileMu       sync.Mutex
+	fileAcceptCh map[string]chan protocol.FileAcceptPayload
+	fileDoneCh   map[string]chan protocol.FileDonePayload
 }
 
 // NewRelayClient constructs a RelayClient and loads any saved RelayProfile from dataDir.
 func NewRelayClient(dataDir string) *RelayClient {
 	rc := &RelayClient{
-		profilePath: filepath.Join(dataDir, "admin_profile.json"),
+		profilePath:  filepath.Join(dataDir, "admin_profile.json"),
+		fileAcceptCh: make(map[string]chan protocol.FileAcceptPayload),
+		fileDoneCh:   make(map[string]chan protocol.FileDonePayload),
 	}
 	if data, err := os.ReadFile(rc.profilePath); err == nil {
 		var p security.RelayProfile
@@ -155,11 +169,59 @@ func (c *RelayClient) Close() {
 	c.mu.Unlock()
 }
 
-// GenerateClientBinary creates a ClienteRemoto.exe bound to the configured Relay server
-// using the Relay's pinned certificate, ClientToken (never AdminToken), and optional PNG logo.
+// ProvisionClientCredential asks the live Relay to mint a unique, individually revocable
+// mTLS certificate + token for a new client binary.
+func (c *RelayClient) ProvisionClientCredential(label string) (protocol.AdminProvisionRespPayload, error) {
+	conn := c.currentConn()
+	if conn == nil {
+		return protocol.AdminProvisionRespPayload{}, errors.New("sin conexión al servidor puente")
+	}
+
+	ch := make(chan protocol.AdminProvisionRespPayload, 1)
+	c.provMu.Lock()
+	c.provCh = ch
+	c.provMu.Unlock()
+	defer func() {
+		c.provMu.Lock()
+		if c.provCh == ch {
+			c.provCh = nil
+		}
+		c.provMu.Unlock()
+	}()
+
+	if err := c.writeJSON(conn, protocol.MsgAdminProvisionClient, protocol.AdminProvisionReqPayload{
+		Label: strings.TrimSpace(label),
+	}); err != nil {
+		return protocol.AdminProvisionRespPayload{}, err
+	}
+
+	select {
+	case resp := <-ch:
+		if !resp.OK {
+			if resp.Error == "" {
+				resp.Error = "el servidor rechazó la emisión de credencial"
+			}
+			return protocol.AdminProvisionRespPayload{}, errors.New(resp.Error)
+		}
+		return resp, nil
+	case <-time.After(5 * time.Second):
+		return protocol.AdminProvisionRespPayload{}, errors.New("tiempo de espera agotado al emitir credencial")
+	}
+}
+
+// GenerateClientBinary creates a client executable bound to the configured Relay server.
+// When connected to the Relay, it provisions a unique revocable client mTLS certificate and token;
+// if offline, it falls back to the shared client credentials stored in RelayProfile (never AdminToken).
 func (c *RelayClient) GenerateClientBinary(template []byte, logoPNG []byte) ([]byte, error) {
+	bin, _, err := c.GenerateClientBinaryWithLabel(template, logoPNG, "")
+	return bin, err
+}
+
+// GenerateClientBinaryWithLabel works like GenerateClientBinary and attaches an optional label
+// to the provisioned per-client credential, returning the binary and issued credential ID.
+func (c *RelayClient) GenerateClientBinaryWithLabel(template []byte, logoPNG []byte, label string) ([]byte, string, error) {
 	if len(template) == 0 {
-		return nil, errors.New("plantilla de cliente no disponible; compila el proyecto con build.bat")
+		return nil, "", errors.New("plantilla de cliente no disponible; compila el proyecto con: go run ./cmd/build")
 	}
 	c.mu.RLock()
 	prof := c.profile
@@ -167,16 +229,42 @@ func (c *RelayClient) GenerateClientBinary(template []byte, logoPNG []byte) ([]b
 	c.mu.RUnlock()
 
 	if !ok {
-		return nil, errors.New("configura el servidor primero")
+		return nil, "", errors.New("configura el servidor primero")
 	}
 
-	return config.AppendToBinary(template, config.ClientConfig{
+	clientTok := prof.ClientToken
+	clientCert := prof.ClientCertDER
+	clientKey := prof.ClientKeyDER
+	credID := security.DefaultClientCredentialID
+
+	if prov, err := c.ProvisionClientCredential(label); err == nil &&
+		len(prov.ClientToken) >= 32 && len(prov.ClientCertDER) > 0 && len(prov.ClientKeyDER) > 0 {
+		clientTok = prov.ClientToken
+		clientCert = prov.ClientCertDER
+		clientKey = prov.ClientKeyDER
+		credID = prov.CredentialID
+	}
+
+	built, err := config.AppendToBinary(template, config.ClientConfig{
 		ServerAddr:    prof.ServerAddr,
 		CertSHA256:    prof.CertSHA256,
-		AuthToken:     prof.ClientToken,
-		ClientCertDER: prof.ClientCertDER,
-		ClientKeyDER:  prof.ClientKeyDER,
+		AuthToken:     clientTok,
+		ClientCertDER: clientCert,
+		ClientKeyDER:  clientKey,
 		LogoPNG:       logoPNG,
+	})
+	return built, credID, err
+}
+
+// RevokeClient revokes a client's credentials on the Relay and disconnects it immediately.
+func (c *RelayClient) RevokeClient(credentialID, clientID string) error {
+	conn := c.currentConn()
+	if conn == nil {
+		return errors.New("no hay conexión con el servidor puente")
+	}
+	return c.writeJSON(conn, protocol.MsgAdminRevokeClient, protocol.AdminRevokeClientPayload{
+		CredentialID: strings.TrimSpace(credentialID),
+		ClientID:     strings.TrimSpace(clientID),
 	})
 }
 
@@ -226,6 +314,168 @@ func (c *RelayClient) SendKey(ev protocol.KeyEvent) {
 	}
 }
 
+// SendClipboard synchronizes UTF-8 clipboard text to the active remote client.
+func (c *RelayClient) SendClipboard(text string) {
+	if len(text) == 0 || len(text) > protocol.MaxClipboardPayloadSize-64 {
+		return
+	}
+	if conn := c.currentConn(); conn != nil {
+		_ = c.writeJSON(conn, protocol.MsgClipboard, protocol.ClipboardPayload{Text: text})
+	}
+}
+
+// SendSystemAction sends a system action (e.g. protocol.ActionCtrlAltDel) to the active client.
+func (c *RelayClient) SendSystemAction(action string) {
+	if action == "" {
+		return
+	}
+	if conn := c.currentConn(); conn != nil {
+		_ = c.writeJSON(conn, protocol.MsgSystemAction, protocol.SystemActionPayload{Action: action})
+	}
+}
+
+// SendFile transfers a local file to the active remote client with SHA-256 integrity verification.
+func (c *RelayClient) SendFile(filePath string) error {
+	conn := c.currentConn()
+	if conn == nil {
+		return errors.New("no hay conexión con el servidor puente")
+	}
+	c.mu.RLock()
+	inSess := c.activeSession != ""
+	c.mu.RUnlock()
+	if !inSess {
+		return errors.New("no hay ninguna sesión remota activa")
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return errors.New("selecciona un archivo, no una carpeta")
+	}
+	if info.Size() > protocol.MaxFileTransferSize {
+		return fmt.Errorf("el archivo supera el límite de %d MB", protocol.MaxFileTransferSize/(1024*1024))
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return err
+	}
+	sumHex := hex.EncodeToString(hasher.Sum(nil))
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	txID, err := security.RandomHex(8)
+	if err != nil {
+		return err
+	}
+	safeName := protocol.SanitizeFileName(filepath.Base(filePath))
+
+	acceptCh := make(chan protocol.FileAcceptPayload, 1)
+	doneCh := make(chan protocol.FileDonePayload, 1)
+	c.fileMu.Lock()
+	c.fileAcceptCh[txID] = acceptCh
+	c.fileDoneCh[txID] = doneCh
+	c.fileMu.Unlock()
+	defer func() {
+		c.fileMu.Lock()
+		delete(c.fileAcceptCh, txID)
+		delete(c.fileDoneCh, txID)
+		c.fileMu.Unlock()
+	}()
+
+	c.emitFileStatus(safeName, true, "Enviando "+safeName+"...")
+
+	if err := c.writeJSON(conn, protocol.MsgFileOffer, protocol.FileOfferPayload{
+		TransferID: txID,
+		Name:       safeName,
+		Size:       info.Size(),
+		SHA256:     sumHex,
+	}); err != nil {
+		c.emitFileStatus(safeName, false, "Error enviando oferta")
+		return err
+	}
+
+	select {
+	case acc := <-acceptCh:
+		if !acc.Accepted {
+			reason := acc.Reason
+			if reason == "" {
+				reason = "transferencia rechazada"
+			}
+			c.emitFileStatus(safeName, false, reason)
+			return errors.New(reason)
+		}
+	case <-time.After(15 * time.Second):
+		c.emitFileStatus(safeName, false, "sin respuesta del equipo remoto")
+		return errors.New("sin respuesta del equipo remoto al enviar archivo")
+	}
+
+	buf := make([]byte, protocol.FileChunkSize)
+	var offset uint64
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			pkt, err := protocol.EncodeFileChunk(protocol.FileChunk{
+				TransferID: txID,
+				Offset:     offset,
+				Data:       buf[:n],
+			})
+			if err != nil {
+				return err
+			}
+			if err := c.writeMessage(conn, protocol.MsgFileChunk, pkt); err != nil {
+				c.emitFileStatus(safeName, false, "error durante el envío")
+				return err
+			}
+			offset += uint64(n)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+
+	if err := c.writeJSON(conn, protocol.MsgFileDone, protocol.FileDonePayload{
+		TransferID: txID,
+		OK:         true,
+	}); err != nil {
+		c.emitFileStatus(safeName, false, "error cerrando envío")
+		return err
+	}
+
+	select {
+	case done := <-doneCh:
+		if !done.OK {
+			msg := done.Error
+			if msg == "" {
+				msg = "error al guardar el archivo en el equipo remoto"
+			}
+			c.emitFileStatus(safeName, false, msg)
+			return errors.New(msg)
+		}
+		detail := "Archivo guardado en el equipo remoto"
+		if done.SavedPath != "" {
+			detail = "Guardado en " + done.SavedPath
+		}
+		c.emitFileStatus(safeName, true, detail)
+		return nil
+	case <-time.After(20 * time.Second):
+		c.emitFileStatus(safeName, false, "sin confirmación final del equipo remoto")
+		return errors.New("sin confirmación final del equipo remoto")
+	}
+}
+
 // SendStreamConfig updates quality on the active client through the Relay.
 func (c *RelayClient) SendStreamConfig(quality int, keyframe bool) {
 	if conn := c.currentConn(); conn != nil {
@@ -258,6 +508,15 @@ func (c *RelayClient) isCurrentGen(gen uint64) bool {
 	ok := c.loopGen == gen
 	c.mu.RUnlock()
 	return ok
+}
+
+func (c *RelayClient) emitFileStatus(name string, ok bool, detail string) {
+	c.mu.RLock()
+	cb := c.events.OnFileStatus
+	c.mu.RUnlock()
+	if cb != nil {
+		cb(name, ok, detail)
+	}
 }
 
 func (c *RelayClient) runLoop(ctx context.Context, gen uint64, prof security.RelayProfile) {
@@ -449,6 +708,20 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 				}
 			}
 
+		case protocol.MsgAdminProvisionResp:
+			var pr protocol.AdminProvisionRespPayload
+			if json.Unmarshal(data, &pr) == nil {
+				c.provMu.Lock()
+				ch := c.provCh
+				c.provMu.Unlock()
+				if ch != nil {
+					select {
+					case ch <- pr:
+					default:
+					}
+				}
+			}
+
 		case protocol.MsgSessionEvent:
 			var sev protocol.SessionEventPayload
 			if json.Unmarshal(data, &sev) == nil {
@@ -462,6 +735,46 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 			c.mu.RUnlock()
 			if sid != "" && cb != nil {
 				cb(sid, data)
+			}
+
+		case protocol.MsgClipboard:
+			var clip protocol.ClipboardPayload
+			if json.Unmarshal(data, &clip) == nil && clip.Text != "" {
+				c.mu.RLock()
+				sid := c.activeSession
+				cb := c.events.OnClipboard
+				c.mu.RUnlock()
+				if sid != "" && cb != nil {
+					cb(clip.Text)
+				}
+			}
+
+		case protocol.MsgFileAccept:
+			var fa protocol.FileAcceptPayload
+			if json.Unmarshal(data, &fa) == nil && fa.TransferID != "" {
+				c.fileMu.Lock()
+				ch := c.fileAcceptCh[fa.TransferID]
+				c.fileMu.Unlock()
+				if ch != nil {
+					select {
+					case ch <- fa:
+					default:
+					}
+				}
+			}
+
+		case protocol.MsgFileDone:
+			var fd protocol.FileDonePayload
+			if json.Unmarshal(data, &fd) == nil && fd.TransferID != "" {
+				c.fileMu.Lock()
+				ch := c.fileDoneCh[fd.TransferID]
+				c.fileMu.Unlock()
+				if ch != nil {
+					select {
+					case ch <- fd:
+					default:
+					}
+				}
 			}
 		}
 	}

@@ -37,34 +37,33 @@ jobs:
             exit 1
           fi
 
-      - name: Vet (Linux)
+      - name: Vet (Linux amd64)
         env:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: amd64
-        run: go vet ./cmd/client ./cmd/relay ./internal/admin ./internal/config ./internal/linux ./internal/protocol ./internal/relay ./internal/security ./internal/video
+        run: go vet ./...
 
-      - name: Vet (Windows)
+      - name: Vet (Windows amd64)
         env:
           CGO_ENABLED: "0"
           GOOS: windows
           GOARCH: amd64
         run: go vet ./...
 
-      - name: Test (Linux)
-        run: go test -race -count=1 ./internal/admin ./internal/config ./internal/linux ./internal/protocol ./internal/relay ./internal/security ./internal/video
-
-      - name: Cross-build all binaries
+      - name: Vet (Windows arm64)
         env:
           CGO_ENABLED: "0"
-          GOARCH: amd64
+          GOOS: windows
+          GOARCH: arm64
+        run: go vet ./...
+
+      - name: Test (Linux)
+        run: go test -race -count=1 ./...
+
+      - name: Cross-build all binaries
         run: |
-          mkdir -p cmd/admin/assets dist
-          GOOS=windows go build -trimpath -ldflags="-H=windowsgui -s -w" -o cmd/admin/assets/client_template.exe ./cmd/client
-          GOOS=linux   go build -trimpath -ldflags="-s -w"              -o cmd/admin/assets/client_template_linux ./cmd/client
-          GOOS=windows go build -trimpath -ldflags="-H=windowsgui -s -w" -o dist/AdminRemoto.exe ./cmd/admin
-          GOOS=windows go build -trimpath -ldflags="-s -w"              -o dist/RelayServidor.exe ./cmd/relay
-          GOOS=linux   go build -trimpath -ldflags="-s -w"              -o dist/RelayServidor ./cmd/relay
+          go run ./cmd/build
           ls -lh dist/
 
   test-windows:

@@ -5,31 +5,23 @@ package linux
 import (
 	"encoding/binary"
 	"sort"
-)
 
-// MonitorBounds describes a display rectangle in virtual desktop coordinates.
-type MonitorBounds struct {
-	Index   int
-	X       int
-	Y       int
-	Width   int
-	Height  int
-	Primary bool
-}
+	"remote-control/internal/clientui"
+)
 
 // EnumMonitors opens a short-lived X11 connection and returns all active monitors
 // with Monitor 1 = Primary (Index 0).
-func EnumMonitors() []MonitorBounds {
+func EnumMonitors() []clientui.MonitorBounds {
 	xc, err := dialX11()
 	if err != nil {
-		return []MonitorBounds{{Index: 0, Width: 1280, Height: 720, Primary: true}}
+		return []clientui.MonitorBounds{{Index: 0, Width: 1280, Height: 720, Primary: true}}
 	}
 	defer xc.Close()
 	return enumMonitorsOnConn(xc)
 }
 
-func enumMonitorsOnConn(xc *x11Conn) []MonitorBounds {
-	fallback := []MonitorBounds{{
+func enumMonitorsOnConn(xc *x11Conn) []clientui.MonitorBounds {
+	fallback := []clientui.MonitorBounds{{
 		Index:   0,
 		X:       0,
 		Y:       0,
@@ -86,7 +78,7 @@ func enumMonitorsOnConn(xc *x11Conn) []MonitorBounds {
 		return fallback
 	}
 
-	var mons []MonitorBounds
+	var mons []clientui.MonitorBounds
 	for i := 0; i < numCrtcs; i++ {
 		crtcID := binary.LittleEndian.Uint32(rep[32+i*4 : 36+i*4])
 		var ciReq [12]byte
@@ -118,7 +110,7 @@ func enumMonitorsOnConn(xc *x11Conn) []MonitorBounds {
 			}
 		}
 
-		mons = append(mons, MonitorBounds{
+		mons = append(mons, clientui.MonitorBounds{
 			X:       x,
 			Y:       y,
 			Width:   w,
@@ -148,9 +140,9 @@ func enumMonitorsOnConn(xc *x11Conn) []MonitorBounds {
 	return mons
 }
 
-func resolveMonitorBoundsOnConn(xc *x11Conn, monitorIndex int) MonitorBounds {
+func resolveMonitorBoundsOnConn(xc *x11Conn, monitorIndex int) clientui.MonitorBounds {
 	if monitorIndex < 0 {
-		return MonitorBounds{
+		return clientui.MonitorBounds{
 			Index:  -1,
 			X:      0,
 			Y:      0,

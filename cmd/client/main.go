@@ -1,3 +1,5 @@
+//go:build windows || linux
+
 package main
 
 import (
@@ -7,21 +9,29 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/user"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"remote-control/internal/clientui"
 	"remote-control/internal/config"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
+	"remote-control/internal/transfer"
 )
 
 type clientAgent struct {
 	cfg      config.ClientConfig
 	tlsCfg   *tls.Config
 	hostname string
+	username string
+	sessionW string
 	window   clientWindow
 	injector inputInjector
+	receiver *transfer.Receiver
 
 	mu           sync.Mutex
 	conn         *tls.Conn
@@ -30,6 +40,9 @@ type clientAgent struct {
 	activeID     string
 	promptTimer  *time.Timer
 	streamCancel context.CancelFunc
+
+	clipMu       sync.Mutex
+	lastClipText string
 
 	quality          atomic.Int32
 	monitorIdx       atomic.Int32 // 0 = Monitor 1 (default), 1..N-1 = other monitors, -1 = all monitors
@@ -55,12 +68,15 @@ func main() {
 	agent := &clientAgent{
 		cfg:       cfg,
 		hostname:  hostname,
+		username:  currentUsername(),
+		sessionW:  platformSessionWarning(),
 		injector:  newPlatformInjector(),
+		receiver:  transfer.NewReceiver(""),
 		ackWakeCh: make(chan struct{}, 1),
 	}
 	agent.quality.Store(78)
 
-	window := newPlatformWindow(hostname, cfg.LogoPNG, clientWindowCallbacks{
+	window := newPlatformWindow(hostname, cfg.LogoPNG, clientui.Callbacks{
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
@@ -74,7 +90,7 @@ func main() {
 	if cfgErr != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(uiError, "Sense configuració")
+			window.SetState(clientui.StateError, "Sense configuració")
 		}()
 		_ = window.Run()
 		return
@@ -84,7 +100,7 @@ func main() {
 	if err != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(uiError, "Certificat no vàlid")
+			window.SetState(clientui.StateError, "Certificat no vàlid")
 		}()
 		_ = window.Run()
 		return
@@ -100,13 +116,20 @@ func main() {
 	cancel()
 }
 
+func (a *clientAgent) onlineStatusText() string {
+	if a.sessionW != "" {
+		return a.sessionW
+	}
+	return "En línia"
+}
+
 func (a *clientAgent) runLoop(ctx context.Context) {
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		a.window.SetState(uiConnecting, "Connectant...")
+		a.window.SetState(clientui.StateConnecting, "Connectant...")
 
 		err := a.connectAndServe(ctx)
 		a.cleanupAfterDisconnect()
@@ -116,10 +139,10 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		}
 		if err != nil {
 			if errors.Is(err, errAuthRejected) {
-				a.window.SetState(uiError, "Accés rebutjat")
+				a.window.SetState(clientui.StateError, "Accés rebutjat")
 				backoff = 5 * time.Second
 			} else {
-				a.window.SetState(uiConnecting, "Reconnectant...")
+				a.window.SetState(clientui.StateConnecting, "Reconnectant...")
 			}
 		}
 
@@ -177,6 +200,8 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	if err := protocol.WriteJSON(conn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    a.cfg.AuthToken,
 		Hostname: a.hostname,
+		OS:       runtime.GOOS,
+		Username: a.username,
 		Width:    w,
 		Height:   h,
 		Monitors: protoMons,
@@ -201,7 +226,11 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	a.conn = conn
 	a.mu.Unlock()
 
-	a.window.SetState(uiOnline, "En línia")
+	if a.sessionW != "" {
+		a.window.SetState(clientui.StateError, a.sessionW)
+	} else {
+		a.window.SetState(clientui.StateOnline, "En línia")
+	}
 
 	// Start periodic heartbeat ping.
 	pingDone := make(chan struct{})
@@ -276,16 +305,88 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 			}
 
 		case protocol.MsgMouse:
-			if a.isSessionActive() && a.verifyActiveServerConn(conn) {
+			if a.isSessionActive() {
 				if ev, err := protocol.DecodeMouse(data); err == nil {
 					a.injector.HandleMouse(ev, int(a.monitorIdx.Load()))
 				}
 			}
 
 		case protocol.MsgKey:
-			if a.isSessionActive() && a.verifyActiveServerConn(conn) {
+			if a.isSessionActive() {
 				if ev, err := protocol.DecodeKey(data); err == nil {
 					a.injector.HandleKey(ev)
+				}
+			}
+
+		case protocol.MsgClipboard:
+			if a.isSessionActive() {
+				var clip protocol.ClipboardPayload
+				if json.Unmarshal(data, &clip) == nil && clip.Text != "" {
+					a.clipMu.Lock()
+					a.lastClipText = clip.Text
+					a.clipMu.Unlock()
+					_ = writePlatformClipboard(clip.Text)
+				}
+			}
+
+		case protocol.MsgSystemAction:
+			if a.isSessionActive() {
+				var sa protocol.SystemActionPayload
+				if json.Unmarshal(data, &sa) == nil && sa.Action != "" {
+					a.injector.SendSystemAction(sa.Action)
+				}
+			}
+
+		case protocol.MsgFileOffer:
+			if a.isSessionActive() {
+				var offer protocol.FileOfferPayload
+				if json.Unmarshal(data, &offer) == nil && offer.TransferID != "" {
+					if err := a.receiver.StartOffer(offer); err != nil {
+						_ = a.writeJSON(conn, protocol.MsgFileAccept, protocol.FileAcceptPayload{
+							TransferID: offer.TransferID,
+							Accepted:   false,
+							Reason:     err.Error(),
+						})
+					} else {
+						_ = a.writeJSON(conn, protocol.MsgFileAccept, protocol.FileAcceptPayload{
+							TransferID: offer.TransferID,
+							Accepted:   true,
+						})
+					}
+				}
+			}
+
+		case protocol.MsgFileChunk:
+			if a.isSessionActive() {
+				if ch, err := protocol.DecodeFileChunk(data); err == nil {
+					if err := a.receiver.WriteChunk(ch); err != nil {
+						_ = a.writeJSON(conn, protocol.MsgFileDone, protocol.FileDonePayload{
+							TransferID: ch.TransferID,
+							OK:         false,
+							Error:      err.Error(),
+						})
+					}
+				}
+			}
+
+		case protocol.MsgFileDone:
+			if a.isSessionActive() {
+				var fd protocol.FileDonePayload
+				if json.Unmarshal(data, &fd) == nil && fd.TransferID != "" {
+					savedPath, err := a.receiver.Finish(fd.TransferID)
+					if err != nil {
+						_ = a.writeJSON(conn, protocol.MsgFileDone, protocol.FileDonePayload{
+							TransferID: fd.TransferID,
+							OK:         false,
+							Error:      err.Error(),
+						})
+					} else {
+						_ = a.writeJSON(conn, protocol.MsgFileDone, protocol.FileDonePayload{
+							TransferID: fd.TransferID,
+							OK:         true,
+							SavedPath:  savedPath,
+						})
+					}
 				}
 			}
 		}
@@ -319,7 +420,7 @@ func (a *clientAgent) handleConsentRequest(req protocol.ConsentReqPayload) {
 	})
 	a.mu.Unlock()
 
-	a.window.SetState(uiPrompt, "")
+	a.window.SetState(clientui.StatePrompt, "")
 }
 
 func (a *clientAgent) expirePendingPrompt(sessionID string) {
@@ -340,7 +441,7 @@ func (a *clientAgent) expirePendingPrompt(sessionID string) {
 			Reason:    "Temps d'espera esgotat",
 		})
 	}
-	a.window.SetState(uiOnline, "En línia")
+	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
 }
 
 func (a *clientAgent) onUserAllow() {
@@ -377,10 +478,11 @@ func (a *clientAgent) onUserAllow() {
 
 	// Only unlock OS input injection after strict mTLS 1.3 + pinned server cert + explicit user "Permetre".
 	a.injector.SetEnabled(true)
-	a.window.SetState(uiActive, "")
+	a.window.SetState(clientui.StateActive, "")
 	a.monitorIdx.Store(0) // Always start on Monitor 1
 	a.forceKeyframe.Store(true)
 	go a.streamScreen(streamCtx, conn, sid)
+	go a.syncClipboardLoop(streamCtx, conn)
 }
 
 func (a *clientAgent) onUserDeny() {
@@ -405,12 +507,12 @@ func (a *clientAgent) onUserDeny() {
 			Reason:    "Denegat per l'usuari",
 		})
 	}
-	a.window.SetState(uiOnline, "En línia")
+	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
 }
 
 func (a *clientAgent) onUserDisconnect() {
 	a.stopAllSessions("Desconnectat per l'usuari")
-	a.window.SetState(uiOnline, "En línia")
+	a.window.SetState(clientui.StateOnline, a.onlineStatusText())
 }
 
 func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
@@ -437,8 +539,9 @@ func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
 
 	if changed {
 		a.injector.SetEnabled(false)
+		a.receiver.AbortAll()
 		if connected {
-			a.window.SetState(uiOnline, "En línia")
+			a.window.SetState(clientui.StateOnline, a.onlineStatusText())
 		}
 	}
 }
@@ -467,6 +570,7 @@ func (a *clientAgent) stopAllSessions(reason string) {
 	a.mu.Unlock()
 
 	a.injector.SetEnabled(false)
+	a.receiver.AbortAll()
 	if conn != nil && sid != "" {
 		_ = a.writeJSON(conn, protocol.MsgSessionStop, protocol.SessionStopPayload{
 			SessionID: sid,
@@ -482,6 +586,7 @@ func (a *clientAgent) cleanupAfterDisconnect() {
 	a.mu.Unlock()
 
 	a.injector.SetEnabled(false)
+	a.receiver.AbortAll()
 }
 
 func (a *clientAgent) isSessionActive() bool {
@@ -491,8 +596,36 @@ func (a *clientAgent) isSessionActive() bool {
 	return active
 }
 
-func (a *clientAgent) verifyActiveServerConn(conn *tls.Conn) bool {
-	return conn != nil && security.VerifyServerTLSConn(conn, a.cfg.CertSHA256) == nil
+func (a *clientAgent) syncClipboardLoop(ctx context.Context, conn net.Conn) {
+	initText := readPlatformClipboard()
+	a.clipMu.Lock()
+	a.lastClipText = initText
+	a.clipMu.Unlock()
+
+	ticker := time.NewTicker(800 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cur := readPlatformClipboard()
+			if cur == "" || len(cur) > protocol.MaxClipboardPayloadSize-64 {
+				continue
+			}
+			a.clipMu.Lock()
+			changed := cur != a.lastClipText
+			if changed {
+				a.lastClipText = cur
+			}
+			a.clipMu.Unlock()
+
+			if changed {
+				_ = a.writeJSON(conn, protocol.MsgClipboard, protocol.ClipboardPayload{Text: cur})
+			}
+		}
+	}
 }
 
 func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid string) {
@@ -593,4 +726,20 @@ func (a *clientAgent) writeJSON(conn net.Conn, msgType uint8, v any) error {
 	defer a.writeMu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return protocol.WriteJSON(conn, msgType, v)
+}
+
+func currentUsername() string {
+	if u, err := user.Current(); err == nil && u != nil && u.Username != "" {
+		name := u.Username
+		if idx := strings.LastIndex(name, `\`); idx >= 0 && idx+1 < len(name) {
+			name = name[idx+1:]
+		}
+		return name
+	}
+	for _, k := range []string{"USERNAME", "USER"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
+	}
+	return ""
 }

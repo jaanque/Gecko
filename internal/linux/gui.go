@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"remote-control/internal/clientui"
 )
 
 const (
@@ -29,10 +31,10 @@ const (
 type ClientWindow struct {
 	hostname  string
 	logoPNG   []byte
-	callbacks ClientCallbacks
+	callbacks clientui.Callbacks
 
 	mu        sync.Mutex
-	state     ClientUIState
+	state     clientui.State
 	detail    string
 	xc        *x11Conn
 	win       uint32
@@ -49,12 +51,12 @@ type ClientWindow struct {
 }
 
 // NewClientWindow constructs a Linux X11 ClientWindow instance.
-func NewClientWindow(hostname string, logoPNG []byte, cb ClientCallbacks) *ClientWindow {
+func NewClientWindow(hostname string, logoPNG []byte, cb clientui.Callbacks) *ClientWindow {
 	return &ClientWindow{
 		hostname:  hostname,
 		logoPNG:   logoPNG,
 		callbacks: cb,
-		state:     UIStateConnecting,
+		state:     clientui.StateConnecting,
 		detail:    "Connectant...",
 		readyCh:   make(chan struct{}),
 		canvas:    newClientCanvas(logoPNG),
@@ -67,7 +69,7 @@ func (w *ClientWindow) Ready() <-chan struct{} {
 }
 
 // SetState safely updates the window state from any goroutine.
-func (w *ClientWindow) SetState(st ClientUIState, detail string) {
+func (w *ClientWindow) SetState(st clientui.State, detail string) {
 	w.mu.Lock()
 	w.state = st
 	w.detail = detail
@@ -227,7 +229,7 @@ func (w *ClientWindow) Run() error {
 			}
 			if msgType == atomWake {
 				st := w.currentState()
-				if st == UIStatePrompt {
+				if st == clientui.StatePrompt {
 					_ = xc.MapWindow(win)
 					_ = xc.RaiseWindow(win)
 					if atomNetWMState != 0 && atomNetWMStateAbove != 0 {
@@ -264,7 +266,7 @@ func (w *ClientWindow) Run() error {
 	return nil
 }
 
-func (w *ClientWindow) currentState() ClientUIState {
+func (w *ClientWindow) currentState() clientui.State {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.state

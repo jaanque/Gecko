@@ -1,14 +1,11 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,11 +23,24 @@ func main() {
 	defaultListen := envOr("RELAY_LISTEN", ":9443")
 	defaultData := envOr("RELAY_DATA_DIR", "")
 	defaultPublic := envOr("RELAY_PUBLIC_ADDR", "")
+	defaultShowKey := os.Getenv("RELAY_SHOW_KEY") == "1" || strings.EqualFold(os.Getenv("RELAY_SHOW_KEY"), "true")
 
 	listenAddr := flag.String("listen", defaultListen, "Puerto/dirección TCP TLS 1.3 (ej. :9443)")
 	dataDir := flag.String("data-dir", defaultData, "Carpeta de datos TLS y tokens")
 	publicAddr := flag.String("public-addr", defaultPublic, "Dominio o IP pública (ej. remoto.tudominio.com:9443)")
+	showKey := flag.Bool("show-key", defaultShowKey, "Mostrar la clave maestra RMT2:... y salir (o imprimir al arrancar con RELAY_SHOW_KEY=1)")
+	listClients := flag.Bool("list-clients", false, "Listar las credenciales de cliente emitidas y salir")
+	revokeID := flag.String("revoke", "", "Revocar una credencial de cliente por ID (o 'default') y salir")
+	healthcheck := flag.Bool("healthcheck", false, "Comprobar si el puerto del Relay responde localmente y salir")
 	flag.Parse()
+
+	if *healthcheck {
+		if err := runHealthcheck(*listenAddr); err != nil {
+			fmt.Fprintf(os.Stderr, "healthcheck fallido: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	resolvedData := *dataDir
 	if resolvedData == "" {
@@ -46,6 +56,43 @@ func main() {
 		log.Fatalf("Error inicializando TLS: %v", err)
 	}
 
+	if *listClients {
+		clients := identity.ListIssuedClients()
+		if len(clients) == 0 {
+			fmt.Println("No hay credenciales de cliente individuales emitidas todavía.")
+			return
+		}
+		for _, c := range clients {
+			state := "ACTIVA"
+			if c.Revoked {
+				state = "REVOCADA"
+			}
+			fmt.Printf("%-14s %-9s %-24s %s\n", c.ID, state, c.Label, c.CreatedAt.Format(time.RFC3339))
+		}
+		return
+	}
+
+	if strings.TrimSpace(*revokeID) != "" {
+		if err := identity.RevokeClient(*revokeID); err != nil {
+			log.Fatalf("No se pudo revocar %q: %v", *revokeID, err)
+		}
+		fmt.Printf("Credencial %q revocada correctamente.\n", strings.TrimSpace(*revokeID))
+		return
+	}
+
+	// If explicitly invoked with -show-key (not via env), print the profile key and exit cleanly.
+	if *showKey && !defaultShowKey {
+		port := extractPort(*listenAddr, "9443")
+		resolvedAddr := resolveConnectAddr(*publicAddr, port, detectLANIP())
+		key, err := encodeProfile(identity, resolvedAddr)
+		if err != nil {
+			log.Fatalf("Error generando clave: %v", err)
+		}
+		fmt.Printf("Direccion: %s\n", resolvedAddr)
+		fmt.Printf("Clave:     %s\n", key)
+		return
+	}
+
 	ln, err := tls.Listen("tcp", *listenAddr, security.ServerTLSConfig(identity.Certificate, identity.ClientCAs))
 	if err != nil {
 		log.Fatalf("No se pudo abrir %s: %v", *listenAddr, err)
@@ -56,20 +103,6 @@ func main() {
 	lanIP := detectLANIP()
 	resolvedAddr := resolveConnectAddr(*publicAddr, port, lanIP)
 
-	key, err := security.EncodeProfileKey(security.RelayProfile{
-		ServerAddr:    resolvedAddr,
-		CertSHA256:    identity.CertSHA256,
-		AdminToken:    identity.AdminToken,
-		ClientToken:   identity.ClientToken,
-		AdminCertDER:  identity.AdminCertDER,
-		AdminKeyDER:   identity.AdminKeyDER,
-		ClientCertDER: identity.ClientCertDER,
-		ClientKeyDER:  identity.ClientKeyDER,
-	})
-	if err != nil {
-		log.Fatalf("Error generando clave: %v", err)
-	}
-
 	fmt.Printf("Direccion: %s\n", resolvedAddr)
 	if lanIP != "" {
 		lanAddr := net.JoinHostPort(lanIP, port)
@@ -77,10 +110,24 @@ func main() {
 			fmt.Printf("LAN:       %s\n", lanAddr)
 		}
 	}
-	fmt.Printf("Clave:     %s\n", key)
+
+	if identity.IsNew || defaultShowKey {
+		key, err := encodeProfile(identity, resolvedAddr)
+		if err != nil {
+			log.Fatalf("Error generando clave: %v", err)
+		}
+		fmt.Printf("Clave:     %s\n", key)
+		if identity.IsNew {
+			fmt.Println("Nota: guarda esta clave en un lugar seguro. No volverá a imprimirse al reiniciar (usa -show-key para verla).")
+		}
+	} else {
+		fmt.Println("Clave:     (oculta por seguridad; ejecuta con -show-key para mostrarla)")
+	}
 
 	srv := relay.NewServer(identity)
+	serveDone := make(chan struct{})
 	go func() {
+		defer close(serveDone)
 		if err := srv.Serve(ln); err != nil {
 			log.Printf("Relay detenido: %v", err)
 		}
@@ -89,7 +136,44 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	<-sigCh
+
+	log.Println("Deteniendo RelayServidor de forma ordenada...")
 	_ = ln.Close()
+	srv.Close()
+	select {
+	case <-serveDone:
+	case <-time.After(3 * time.Second):
+	}
+}
+
+func encodeProfile(identity *security.ServerIdentity, serverAddr string) (string, error) {
+	return security.EncodeProfileKey(security.RelayProfile{
+		ServerAddr:    serverAddr,
+		CertSHA256:    identity.CertSHA256,
+		AdminToken:    identity.AdminToken,
+		ClientToken:   identity.ClientToken,
+		AdminCertDER:  identity.AdminCertDER,
+		AdminKeyDER:   identity.AdminKeyDER,
+		ClientCertDER: identity.ClientCertDER,
+		ClientKeyDER:  identity.ClientKeyDER,
+	})
+}
+
+func runHealthcheck(listenAddr string) error {
+	port := extractPort(listenAddr, "9443")
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 2*time.Second)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func extractPort(listenAddr, fallback string) string {
+	if _, port, err := net.SplitHostPort(strings.TrimSpace(listenAddr)); err == nil && port != "" {
+		return port
+	}
+	return fallback
 }
 
 func resolveConnectAddr(configured, port, lanIP string) string {
@@ -104,44 +188,10 @@ func resolveConnectAddr(configured, port, lanIP string) string {
 		return s
 	}
 
-	if pubIP := detectPublicIP(); pubIP != "" {
-		return net.JoinHostPort(pubIP, port)
-	}
 	if lanIP != "" {
 		return net.JoinHostPort(lanIP, port)
 	}
 	return net.JoinHostPort("127.0.0.1", port)
-}
-
-func detectPublicIP() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
-	defer cancel()
-
-	client := &http.Client{Timeout: 2500 * time.Millisecond}
-	endpoints := []string{
-		"https://api.ipify.org",
-		"https://icanhazip.com",
-	}
-	for _, ep := range endpoints {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			continue
-		}
-		ipStr := strings.TrimSpace(string(body))
-		if ip := net.ParseIP(ipStr); ip != nil && ip.To4() != nil {
-			return ip.To4().String()
-		}
-	}
-	return ""
 }
 
 func detectLANIP() string {

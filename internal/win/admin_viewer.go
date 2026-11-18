@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	"remote-control/internal/protocol"
+	"remote-control/internal/video"
 )
 
 var (
@@ -140,15 +141,17 @@ type queuedInput struct {
 }
 
 const (
-	vbtnQualLow = 1
-	vbtnQualMed = 2
-	vbtnQualHi  = 3
-	vbtnFull    = 4
-	vbtnDisc    = 5
-	vbtnHideBar = 6
-	vbtnShowBar = 7
-	vbtnMonAll  = 100
-	vbtnMonBase = 200 // 200 + monitorIndex (0, 1, 2, ...)
+	vbtnQualLow  = 1
+	vbtnQualMed  = 2
+	vbtnQualHi   = 3
+	vbtnFull     = 4
+	vbtnDisc     = 5
+	vbtnHideBar  = 6
+	vbtnShowBar  = 7
+	vbtnSendFile = 8
+	vbtnCAD      = 9
+	vbtnMonAll   = 100
+	vbtnMonBase  = 200 // 200 + monitorIndex (0, 1, 2, ...)
 )
 
 // ViewerCallbacks wires the native remote desktop viewer back to the Hub.
@@ -158,12 +161,15 @@ type ViewerCallbacks struct {
 	OnFrameAck      func(frameID uint32)
 	OnQuality       func(quality int)
 	OnSelectMonitor func(monitorIndex int)
+	OnClipboard     func(text string)
+	OnSystemAction  func(action string)
+	OnSendFile      func(path string) error
 	OnDisconnect    func()
 }
 
 type remoteViewer struct {
 	cb        ViewerCallbacks
-	fb        *FrameBuffer
+	fb        *video.FrameBuffer
 	hInst     uintptr
 	className *uint16
 	cursorArr uintptr
@@ -185,6 +191,12 @@ type remoteViewer struct {
 	fpsTick  time.Time
 	fps      int
 	rttMs    int // -1 until first RTT measurement
+
+	clipMu       sync.Mutex
+	lastClipText string
+
+	statusMsg   string
+	statusUntil time.Time
 
 	frameCh    chan []byte
 	decoderEnd chan struct{}
@@ -242,7 +254,7 @@ func newRemoteViewer(hInst uintptr, cb ViewerCallbacks) *remoteViewer {
 
 	return &remoteViewer{
 		cb:        cb,
-		fb:        NewFrameBuffer(),
+		fb:        video.NewFrameBuffer(),
 		hInst:     hInst,
 		className: className,
 		cursorArr: cursorArr,
@@ -345,10 +357,67 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 
 	go v.decodeLoop(sessionID, fCh, fEnd)
 	go v.inputLoop(inCh, mvCh, inDone)
+	go v.clipboardLoop(fEnd)
 
 	procShowWindow.Call(hwnd, swShowNormal)
 	procUpdateWindow.Call(hwnd)
 	procSetFocus.Call(hwnd)
+}
+
+// ApplyRemoteClipboard writes clipboard text received from the remote client without echoing it back.
+func (v *remoteViewer) ApplyRemoteClipboard(text string) {
+	if text == "" {
+		return
+	}
+	v.clipMu.Lock()
+	v.lastClipText = text
+	v.clipMu.Unlock()
+	_ = WriteClipboardText(text)
+}
+
+// SetFileStatus displays a brief transfer status notice in the viewer toolbar.
+func (v *remoteViewer) SetFileStatus(_ string, _ bool, detail string) {
+	v.mu.Lock()
+	v.statusMsg = detail
+	v.statusUntil = time.Now().Add(6 * time.Second)
+	hwnd := v.hwnd
+	v.mu.Unlock()
+	if hwnd != 0 {
+		procPostMessageW.Call(hwnd, wmViewerFrame, 0, 0)
+	}
+}
+
+func (v *remoteViewer) clipboardLoop(done <-chan struct{}) {
+	// Snapshot current local clipboard so we don't immediately push stale text on session start.
+	initText := ReadClipboardText()
+	v.clipMu.Lock()
+	v.lastClipText = initText
+	v.clipMu.Unlock()
+
+	ticker := time.NewTicker(700 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			cur := ReadClipboardText()
+			if cur == "" {
+				continue
+			}
+			v.clipMu.Lock()
+			changed := cur != v.lastClipText
+			if changed {
+				v.lastClipText = cur
+			}
+			v.clipMu.Unlock()
+
+			if changed && v.cb.OnClipboard != nil {
+				v.cb.OnClipboard(cur)
+			}
+		}
+	}
 }
 
 // SetLatency updates the measured round-trip latency (ms) shown in the toolbar.
@@ -637,9 +706,11 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 
 	hideW := v.scale(30)
 	discW := v.scale(94)
-	fullW := v.scale(122)
+	fullW := v.scale(116)
+	cadW := v.scale(52)
+	fileW := v.scale(64)
 	qHiW := v.scale(44)
-	qMedW := v.scale(68)
+	qMedW := v.scale(66)
 	qLowW := v.scale(44)
 
 	x := width - pad
@@ -650,12 +721,18 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	rcDisc := rect{x - discW, btnY, x, btnY + btnH}
 	x = rcDisc.Left - gap
 
-	fullLabel := "Pantalla completa"
+	fullLabel := "Pantalla comp."
 	if v.fullscreen {
 		fullLabel = "Salir pantalla"
 	}
 	rcFull := rect{x - fullW, btnY, x, btnY + btnH}
-	x = rcFull.Left - v.scale(8)
+	x = rcFull.Left - gap
+
+	rcCAD := rect{x - cadW, btnY, x, btnY + btnH}
+	x = rcCAD.Left - smallGap
+
+	rcFile := rect{x - fileW, btnY, x, btnY + btnH}
+	x = rcFile.Left - v.scale(8)
 	v.toolbarDividers = append(v.toolbarDividers, x)
 	x -= v.scale(8)
 
@@ -666,7 +743,7 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	rcLow := rect{x - qLowW, btnY, x, btnY + btnH}
 	x = rcLow.Left
 
-	btns := make([]viewerToolbarBtn, 0, 14)
+	btns := make([]viewerToolbarBtn, 0, 16)
 
 	v.mu.Lock()
 	monCount := v.monitorCount
@@ -704,6 +781,8 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 		viewerToolbarBtn{id: vbtnQualLow, label: "Baja", rc: rcLow},
 		viewerToolbarBtn{id: vbtnQualMed, label: "Estándar", rc: rcMed},
 		viewerToolbarBtn{id: vbtnQualHi, label: "Alta", rc: rcHi},
+		viewerToolbarBtn{id: vbtnSendFile, label: "Archivo", rc: rcFile},
+		viewerToolbarBtn{id: vbtnCAD, label: "CAD", rc: rcCAD},
 		viewerToolbarBtn{id: vbtnFull, label: fullLabel, rc: rcFull},
 		viewerToolbarBtn{id: vbtnDisc, label: "Desconectar", rc: rcDisc},
 		viewerToolbarBtn{id: vbtnHideBar, label: "▲", rc: rcHide},
@@ -738,6 +817,10 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 	rtt := v.rttMs
 	qual := v.quality
 	activeMon := v.activeMonitor
+	statusMsg := ""
+	if v.statusMsg != "" && time.Now().Before(v.statusUntil) {
+		statusMsg = v.statusMsg
+	}
 	v.mu.Unlock()
 
 	procSetBkMode.Call(memDC, transparentBk)
@@ -757,8 +840,8 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 		hostRC := rect{pad + dotSz + v.scale(9), 0, leftLimit, barH}
 		drawText(memDC, hostname, &hostRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-		statsText := ""
-		if rw > 0 && rh > 0 {
+		statsText := statusMsg
+		if statsText == "" && rw > 0 && rh > 0 {
 			if rtt >= 0 {
 				statsText = fmt.Sprintf("%d×%d · %d fps · %d ms", rw, rh, fps, rtt)
 			} else {
@@ -1085,6 +1168,21 @@ func (v *remoteViewer) handleToolbarClick(hwnd uintptr, btnID int) {
 		v.selectMonitor(hwnd, btnID-vbtnMonBase)
 	case btnID == vbtnFull:
 		v.toggleFullscreen(hwnd)
+	case btnID == vbtnSendFile:
+		if v.cb.OnSendFile != nil {
+			if path, ok := ShowOpenAnyFileDialog(hwnd); ok && path != "" {
+				go func(p string) {
+					if err := v.cb.OnSendFile(p); err != nil {
+						v.SetFileStatus("", false, "Error: "+err.Error())
+					}
+				}(path)
+			}
+		}
+	case btnID == vbtnCAD:
+		if v.cb.OnSystemAction != nil {
+			v.SetFileStatus("", true, "Enviado Ctrl+Alt+Supr")
+			go v.cb.OnSystemAction(protocol.ActionCtrlAltDel)
+		}
 	case btnID == vbtnHideBar:
 		v.toolbarHidden = true
 		v.hoverBtn = 0

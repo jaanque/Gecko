@@ -1,27 +1,15 @@
+//go:build windows || linux
+
 package main
 
-import "remote-control/internal/protocol"
-
-type uiState int
-
-const (
-	uiConnecting uiState = iota
-	uiOnline
-	uiPrompt
-	uiActive
-	uiError
+import (
+	"remote-control/internal/clientui"
+	"remote-control/internal/protocol"
 )
-
-type clientWindowCallbacks struct {
-	OnAllow      func()
-	OnDeny       func()
-	OnDisconnect func()
-	OnClose      func()
-}
 
 type clientWindow interface {
 	Ready() <-chan struct{}
-	SetState(st uiState, detail string)
+	SetState(st clientui.State, detail string)
 	Run() error
 }
 
@@ -34,5 +22,19 @@ type inputInjector interface {
 	SetEnabled(enabled bool)
 	HandleMouse(ev protocol.MouseEvent, monitorIndex int)
 	HandleKey(ev protocol.KeyEvent)
+	SendSystemAction(action string)
 	ReleaseAllKeys()
+}
+
+func monitorBoundsToProto(mons []clientui.MonitorBounds) []protocol.MonitorInfo {
+	out := make([]protocol.MonitorInfo, 0, len(mons))
+	for _, m := range mons {
+		out = append(out, protocol.MonitorInfo{
+			Index:   m.Index,
+			Width:   m.Width,
+			Height:  m.Height,
+			Primary: m.Primary,
+		})
+	}
+	return out
 }

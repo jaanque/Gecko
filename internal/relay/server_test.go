@@ -2,8 +2,12 @@ package relay_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,6 +30,7 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 		t.Fatalf("tls.Listen failed: %v", err)
 	}
 	defer ln.Close()
+	defer srv.Close()
 	go func() { _ = srv.Serve(ln) }()
 
 	clientTLS, err := security.MutualPinnedClientTLSConfig(id.CertSHA256, id.ClientCertDER, id.ClientKeyDER)
@@ -92,6 +97,7 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	clientsCh := make(chan []protocol.ClientSummary, 8)
 	startedCh := make(chan int, 1)
 	frameCh := make(chan []byte, 1)
+	clipCh := make(chan string, 1)
 
 	admClient.SetEvents(admin.RelayEvents{
 		OnRelayStatus: func(connected bool, _ string) {
@@ -112,6 +118,9 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 			cp := make([]byte, len(frame))
 			copy(cp, frame)
 			frameCh <- cp
+		},
+		OnClipboard: func(text string) {
+			clipCh <- text
 		},
 	})
 
@@ -134,32 +143,41 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 		t.Fatal("admin did not connect to relay")
 	}
 
-	// Verify generated client binary uses ClientToken + Client mTLS cert (NEVER Admin credentials!).
-	genBin, err := admClient.GenerateClientBinary([]byte("MZ\x90\x00fake-template"), nil)
+	// Verify generated client binary provisions a UNIQUE revocable client credential (NEVER Admin credentials!).
+	genBin, credID, err := admClient.GenerateClientBinaryWithLabel([]byte("MZ\x90\x00fake-template"), nil, "Equipo-Cliente-1")
 	if err != nil {
-		t.Fatalf("GenerateClientBinary failed: %v", err)
+		t.Fatalf("GenerateClientBinaryWithLabel failed: %v", err)
+	}
+	if credID == "" || credID == security.DefaultClientCredentialID {
+		t.Fatalf("expected unique provisioned credential ID while connected, got %q", credID)
 	}
 	genCfg, err := config.ReadFromBytes(genBin)
 	if err != nil {
 		t.Fatalf("ReadFromBytes failed: %v", err)
 	}
-	if genCfg.AuthToken != id.ClientToken || genCfg.AuthToken == id.AdminToken {
-		t.Fatal("generated client must embed ClientToken, never AdminToken")
+	if genCfg.AuthToken == id.AdminToken || len(genCfg.AuthToken) < 32 {
+		t.Fatal("generated client must embed unique client token, never AdminToken")
 	}
-	if !bytes.Equal(genCfg.ClientCertDER, id.ClientCertDER) || bytes.Equal(genCfg.ClientCertDER, id.AdminCertDER) {
-		t.Fatal("generated client must embed client mTLS cert, never admin mTLS cert")
+	if bytes.Equal(genCfg.ClientCertDER, id.AdminCertDER) || bytes.Equal(genCfg.ClientCertDER, id.ClientCertDER) {
+		t.Fatal("generated client must embed unique client mTLS cert")
 	}
 
-	// 4. Connect a simulated remote PC Client.
-	cliConn, err := tls.Dial("tcp", ln.Addr().String(), clientTLS)
+	// 4. Connect a simulated remote PC Client using the newly provisioned unique credential.
+	uniqueClientTLS, err := security.MutualPinnedClientTLSConfig(genCfg.CertSHA256, genCfg.ClientCertDER, genCfg.ClientKeyDER)
+	if err != nil {
+		t.Fatalf("MutualPinnedClientTLSConfig(unique) failed: %v", err)
+	}
+	cliConn, err := tls.Dial("tcp", ln.Addr().String(), uniqueClientTLS)
 	if err != nil {
 		t.Fatalf("client dial failed: %v", err)
 	}
 	defer cliConn.Close()
 
 	if err := protocol.WriteJSON(cliConn, protocol.MsgAuth, protocol.AuthPayload{
-		Token:    id.ClientToken,
+		Token:    genCfg.AuthToken,
 		Hostname: "PC-REMOTO-EXTERNO",
+		OS:       "linux",
+		Username: "alice",
 		Width:    1920,
 		Height:   1080,
 		Monitors: []protocol.MonitorInfo{
@@ -178,24 +196,27 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 		t.Fatalf("client auth failed: %+v", okResp)
 	}
 
-	// Wait for Admin to see the online PC.
-	var targetID string
+	// Wait for Admin to see the online PC with OS, Username, and CredentialID populated.
+	var target protocol.ClientSummary
 	deadline := time.After(3 * time.Second)
-	for targetID == "" {
+	for target.ID == "" {
 		select {
 		case list := <-clientsCh:
 			for _, c := range list {
 				if c.Hostname == "PC-REMOTO-EXTERNO" {
-					targetID = c.ID
+					target = c
 				}
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for client in admin list")
 		}
 	}
+	if target.OS != "linux" || target.Username != "alice" || target.CredentialID != credID {
+		t.Fatalf("unexpected ClientSummary metadata: %+v", target)
+	}
 
-	// 5. Admin requests control -> Client allows -> Relay forwards frame & input both ways.
-	if err := admClient.RequestConnect(targetID); err != nil {
+	// 5. Admin requests control -> Client allows -> Relay forwards frame, input, clipboard, system action & file.
+	if err := admClient.RequestConnect(target.ID); err != nil {
 		t.Fatalf("RequestConnect failed: %v", err)
 	}
 	mType, data, err = protocol.ReadMessage(cliConn)
@@ -231,6 +252,94 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 		t.Fatal("timed out waiting for relayed frame")
 	}
 
+	// Bidirectional clipboard sync.
+	admClient.SendClipboard("texto-desde-admin")
+	mType, data, err = protocol.ReadMessage(cliConn)
+	if err != nil || mType != protocol.MsgClipboard {
+		t.Fatalf("expected relayed MsgClipboard to client, err=%v type=%d", err, mType)
+	}
+	var gotClip protocol.ClipboardPayload
+	_ = json.Unmarshal(data, &gotClip)
+	if gotClip.Text != "texto-desde-admin" {
+		t.Fatalf("clipboard to client mismatch: %q", gotClip.Text)
+	}
+
+	_ = protocol.WriteJSON(cliConn, protocol.MsgClipboard, protocol.ClipboardPayload{Text: "texto-desde-cliente"})
+	select {
+	case txt := <-clipCh:
+		if txt != "texto-desde-cliente" {
+			t.Fatalf("clipboard to admin mismatch: %q", txt)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for clipboard from client")
+	}
+
+	// System action (Ctrl+Alt+Del).
+	admClient.SendSystemAction(protocol.ActionCtrlAltDel)
+	mType, data, err = protocol.ReadMessage(cliConn)
+	if err != nil || mType != protocol.MsgSystemAction {
+		t.Fatalf("expected relayed MsgSystemAction, err=%v type=%d", err, mType)
+	}
+	var sa protocol.SystemActionPayload
+	_ = json.Unmarshal(data, &sa)
+	if sa.Action != protocol.ActionCtrlAltDel {
+		t.Fatalf("unexpected system action: %+v", sa)
+	}
+
+	// End-to-end file transfer Admin -> Relay -> Client.
+	srcFile := filepath.Join(t.TempDir(), "nota.txt")
+	wantContent := []byte("contenido-de-prueba-gecko-2026")
+	if err := os.WriteFile(srcFile, wantContent, 0o600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	sendErrCh := make(chan error, 1)
+	go func() {
+		sendErrCh <- admClient.SendFile(srcFile)
+	}()
+
+	mType, data, err = protocol.ReadMessage(cliConn)
+	if err != nil || mType != protocol.MsgFileOffer {
+		t.Fatalf("expected MsgFileOffer, err=%v type=%d", err, mType)
+	}
+	var offer protocol.FileOfferPayload
+	_ = json.Unmarshal(data, &offer)
+	wantSum := sha256.Sum256(wantContent)
+	if offer.Name != "nota.txt" || offer.Size != int64(len(wantContent)) || offer.SHA256 != hex.EncodeToString(wantSum[:]) {
+		t.Fatalf("unexpected offer: %+v", offer)
+	}
+	_ = protocol.WriteJSON(cliConn, protocol.MsgFileAccept, protocol.FileAcceptPayload{
+		TransferID: offer.TransferID,
+		Accepted:   true,
+	})
+
+	var received bytes.Buffer
+	for {
+		mType, data, err = protocol.ReadMessage(cliConn)
+		if err != nil {
+			t.Fatalf("reading file stream failed: %v", err)
+		}
+		if mType == protocol.MsgFileChunk {
+			ch, err := protocol.DecodeFileChunk(data)
+			if err != nil {
+				t.Fatalf("DecodeFileChunk failed: %v", err)
+			}
+			received.Write(ch.Data)
+		} else if mType == protocol.MsgFileDone {
+			_ = protocol.WriteJSON(cliConn, protocol.MsgFileDone, protocol.FileDonePayload{
+				TransferID: offer.TransferID,
+				OK:         true,
+				SavedPath:  "/tmp/nota.txt",
+			})
+			break
+		}
+	}
+	if !bytes.Equal(received.Bytes(), wantContent) {
+		t.Fatalf("transferred file bytes mismatch: got %q", received.String())
+	}
+	if err := <-sendErrCh; err != nil {
+		t.Fatalf("SendFile returned error: %v", err)
+	}
+
 	// Input Admin -> Relay -> Client.
 	admClient.SendSelectMonitor(-1)
 	mType, data, err = protocol.ReadMessage(cliConn)
@@ -243,11 +352,37 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 		t.Fatalf("expected monitor -1, got %+v", sc.Monitor)
 	}
 
-	// Disconnect Admin -> Relay -> Client.
-	admClient.DisconnectSession("done")
-	mType, _, err = protocol.ReadMessage(cliConn)
-	if err != nil || mType != protocol.MsgSessionStop {
-		t.Fatalf("expected MsgSessionStop, err=%v type=%d", err, mType)
+	// 6. Revoke client credential -> client is disconnected immediately and cannot re-authenticate!
+	if err := admClient.RevokeClient(credID, target.ID); err != nil {
+		t.Fatalf("RevokeClient failed: %v", err)
+	}
+	// Expect MsgSessionStop or connection close.
+	_ = cliConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		_, _, rerr := protocol.ReadMessage(cliConn)
+		if rerr != nil {
+			break
+		}
+	}
+
+	// Reconnecting with the revoked credential must fail auth.
+	revokedConn, err := tls.Dial("tcp", ln.Addr().String(), uniqueClientTLS)
+	if err != nil {
+		t.Fatalf("dial with revoked cert failed: %v", err)
+	}
+	defer revokedConn.Close()
+	_ = protocol.WriteJSON(revokedConn, protocol.MsgAuth, protocol.AuthPayload{
+		Token:    genCfg.AuthToken,
+		Hostname: "PC-REVOCADO",
+	})
+	mType, data, err = protocol.ReadMessage(revokedConn)
+	if err != nil || mType != protocol.MsgAuthResp {
+		t.Fatalf("expected auth resp for revoked client, err=%v type=%d", err, mType)
+	}
+	var revResp protocol.AuthRespPayload
+	_ = json.Unmarshal(data, &revResp)
+	if revResp.OK {
+		t.Fatal("revoked client must not be allowed to re-authenticate")
 	}
 }
 
@@ -262,6 +397,7 @@ func TestRelayClientReconfigureDoesNotClobberConn(t *testing.T) {
 		t.Fatalf("tls.Listen failed: %v", err)
 	}
 	defer ln.Close()
+	defer srv.Close()
 	go func() { _ = srv.Serve(ln) }()
 
 	admClient := admin.NewRelayClient(t.TempDir())
@@ -307,5 +443,48 @@ func TestRelayClientReconfigureDoesNotClobberConn(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	if err := admClient.RequestConnect("nonexistent-id"); err != nil {
 		t.Fatalf("expected active connection after reconfigure, got error: %v", err)
+	}
+}
+
+func TestRelayPerIPRateLimit(t *testing.T) {
+	id, err := security.LoadOrCreateIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateIdentity failed: %v", err)
+	}
+	srv := relay.NewServer(id)
+	srv.SetRateLimits(2, 2, 10*time.Second)
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", security.ServerTLSConfig(id.Certificate, id.ClientCAs))
+	if err != nil {
+		t.Fatalf("tls.Listen failed: %v", err)
+	}
+	defer ln.Close()
+	defer srv.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	cliTLS, err := security.MutualPinnedClientTLSConfig(id.CertSHA256, id.ClientCertDER, id.ClientKeyDER)
+	if err != nil {
+		t.Fatalf("MutualPinnedClientTLSConfig failed: %v", err)
+	}
+
+	// First two connections consume the 2-per-window quota.
+	for i := 0; i < 2; i++ {
+		c, err := tls.Dial("tcp", ln.Addr().String(), cliTLS)
+		if err != nil {
+			t.Fatalf("dial #%d failed unexpectedly: %v", i, err)
+		}
+		_ = c.Close()
+	}
+
+	// Third connection from the same IP within the window must be closed immediately by the rate limiter.
+	c3, err := tls.Dial("tcp", ln.Addr().String(), cliTLS)
+	if err == nil {
+		_ = c3.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		buf := make([]byte, 1)
+		_, rerr := c3.Read(buf)
+		_ = c3.Close()
+		if rerr == nil {
+			t.Fatal("expected third connection exceeding per-IP rate limit to be rejected")
+		}
 	}
 }

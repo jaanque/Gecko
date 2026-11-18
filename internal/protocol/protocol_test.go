@@ -90,3 +90,38 @@ func TestStrictMessageAndEventValidation(t *testing.T) {
 		t.Fatal("expected unknown key flags to fail")
 	}
 }
+
+func TestFileChunkAndSanitizeFileName(t *testing.T) {
+	raw, err := EncodeFileChunk(FileChunk{
+		TransferID: "tx-1234",
+		Offset:     65536,
+		Data:       []byte("hello-world"),
+	})
+	if err != nil {
+		t.Fatalf("EncodeFileChunk failed: %v", err)
+	}
+	got, err := DecodeFileChunk(raw)
+	if err != nil {
+		t.Fatalf("DecodeFileChunk failed: %v", err)
+	}
+	if got.TransferID != "tx-1234" || got.Offset != 65536 || string(got.Data) != "hello-world" {
+		t.Fatalf("unexpected chunk: %+v", got)
+	}
+
+	if _, err := DecodeFileChunk([]byte{0, 1, 2}); err == nil {
+		t.Fatal("expected short chunk to fail")
+	}
+
+	cases := map[string]string{
+		"../../etc/passwd":            "passwd",
+		`C:\Windows\System32\cmd.exe`: "cmd.exe",
+		"reporte:final?.pdf":          "reportefinal.pdf",
+		"...":                         "archivo.bin",
+		"informe 2026.txt":            "informe 2026.txt",
+	}
+	for in, want := range cases {
+		if got := SanitizeFileName(in); got != want {
+			t.Errorf("SanitizeFileName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

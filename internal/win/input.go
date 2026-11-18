@@ -13,9 +13,11 @@ import (
 
 var (
 	user32Input = syscall.NewLazyDLL("user32.dll")
+	sasDLL      = syscall.NewLazyDLL("sas.dll")
 
 	procSendInput     = user32Input.NewProc("SendInput")
 	procMapVirtualKey = user32Input.NewProc("MapVirtualKeyW")
+	procSendSAS       = sasDLL.NewProc("SendSAS")
 )
 
 const (
@@ -82,21 +84,21 @@ func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent, monitorIndex int) 
 	if ev.Action > protocol.MouseHWheel || ev.Button > protocol.ButtonX2 {
 		return
 	}
-	dx, dy := mapNormalizedToVirtualDesk(ev.X, ev.Y, monitorIndex)
 	pkt := mouseInputPacket{
 		Type: inputMouse,
-		DX:   dx,
-		DY:   dy,
 	}
 
 	switch ev.Action {
 	case protocol.MouseMove:
+		pkt.DX, pkt.DY = mapNormalizedToVirtualDesk(ev.X, ev.Y, monitorIndex)
 		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk
 	case protocol.MouseDown:
+		pkt.DX, pkt.DY = mapNormalizedToVirtualDesk(ev.X, ev.Y, monitorIndex)
 		fl, md := buttonDownFlags(ev.Button)
 		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk | fl
 		pkt.MouseData = md
 	case protocol.MouseUp:
+		pkt.DX, pkt.DY = mapNormalizedToVirtualDesk(ev.X, ev.Y, monitorIndex)
 		fl, md := buttonUpFlags(ev.Button)
 		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk | fl
 		pkt.MouseData = md
@@ -181,6 +183,18 @@ func (inj *InputInjector) HandleKey(ev protocol.KeyEvent) {
 		DwFlags: flags,
 	}
 	procSendInput.Call(1, uintptr(unsafe.Pointer(&pkt)), unsafe.Sizeof(pkt))
+}
+
+// SendSystemAction triggers a supported Windows system action such as Secure Attention Sequence
+// (Ctrl+Alt+Del) via sas.dll!SendSAS (effective when running as a Windows Service / with SAS policy).
+func (inj *InputInjector) SendSystemAction(action string) {
+	if !inj.enabled.Load() || action != protocol.ActionCtrlAltDel {
+		return
+	}
+	if err := procSendSAS.Find(); err == nil {
+		// FALSE (0) = service/system context, TRUE (1) = regular user context (requires policy).
+		_, _, _ = procSendSAS.Call(1)
+	}
 }
 
 // ReleaseAllKeys releases any keys currently held down (called on session end).

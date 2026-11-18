@@ -7,6 +7,8 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"remote-control/internal/clientui"
 )
 
 var (
@@ -16,19 +18,9 @@ var (
 
 const monitorInfoPrimary = 0x00000001
 
-// MonitorBounds describes a physical display monitor in virtual desktop coordinates.
-type MonitorBounds struct {
-	Index   int
-	X       int
-	Y       int
-	Width   int
-	Height  int
-	Primary bool
-}
-
 var (
 	enumMonMu   sync.Mutex
-	enumMonList []MonitorBounds
+	enumMonList []clientui.MonitorBounds
 	enumMonCB   = syscall.NewCallback(enumMonitorProc)
 )
 
@@ -39,7 +31,7 @@ func enumMonitorProc(hMon, _ uintptr, _ uintptr, _ uintptr) uintptr {
 		w := int(mi.RcMonitor.Right - mi.RcMonitor.Left)
 		h := int(mi.RcMonitor.Bottom - mi.RcMonitor.Top)
 		if w > 0 && h > 0 {
-			enumMonList = append(enumMonList, MonitorBounds{
+			enumMonList = append(enumMonList, clientui.MonitorBounds{
 				X:       int(mi.RcMonitor.Left),
 				Y:       int(mi.RcMonitor.Top),
 				Width:   w,
@@ -52,12 +44,12 @@ func enumMonitorProc(hMon, _ uintptr, _ uintptr, _ uintptr) uintptr {
 }
 
 // VirtualDesktopBounds returns the full bounding rectangle spanning all monitors.
-func VirtualDesktopBounds() MonitorBounds {
+func VirtualDesktopBounds() clientui.MonitorBounds {
 	vxRaw, _, _ := procGetSystemMetrics.Call(smXVirtualScreen)
 	vyRaw, _, _ := procGetSystemMetrics.Call(smYVirtualScreen)
 	wRaw, _, _ := procGetSystemMetrics.Call(smCXVirtualScreen)
 	hRaw, _, _ := procGetSystemMetrics.Call(smCYVirtualScreen)
-	return MonitorBounds{
+	return clientui.MonitorBounds{
 		Index:   -1,
 		X:       int(int32(vxRaw)),
 		Y:       int(int32(vyRaw)),
@@ -68,11 +60,11 @@ func VirtualDesktopBounds() MonitorBounds {
 }
 
 // EnumMonitors returns all active monitors with Monitor 1 (index 0) guaranteed to be the primary monitor.
-func EnumMonitors() []MonitorBounds {
+func EnumMonitors() []clientui.MonitorBounds {
 	enumMonMu.Lock()
 	enumMonList = enumMonList[:0]
 	procEnumDisplayMonitors.Call(0, 0, enumMonCB, 0)
-	list := make([]MonitorBounds, len(enumMonList))
+	list := make([]clientui.MonitorBounds, len(enumMonList))
 	copy(list, enumMonList)
 	enumMonMu.Unlock()
 
@@ -80,7 +72,7 @@ func EnumMonitors() []MonitorBounds {
 		vb := VirtualDesktopBounds()
 		vb.Index = 0
 		vb.Primary = true
-		return []MonitorBounds{vb}
+		return []clientui.MonitorBounds{vb}
 	}
 
 	// Primary monitor first (Monitor 1), then left-to-right, top-to-bottom.
@@ -102,7 +94,7 @@ func EnumMonitors() []MonitorBounds {
 
 // ResolveMonitorBounds returns the capture/input bounds for monitorIndex:
 // -1 = all monitors (virtual desktop), 0..N-1 = specific monitor (falls back to Monitor 1 if out of range).
-func ResolveMonitorBounds(monitorIndex int) MonitorBounds {
+func ResolveMonitorBounds(monitorIndex int) clientui.MonitorBounds {
 	if monitorIndex < 0 {
 		return VirtualDesktopBounds()
 	}
