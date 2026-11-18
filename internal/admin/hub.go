@@ -4,27 +4,40 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"remote-control/internal/config"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
-	"remote-control/internal/ws"
 )
 
-// ClientInfo is the JSON snapshot sent to the Admin web UI.
+// ClientInfo is a snapshot of a connected remote PC.
 type ClientInfo struct {
-	ID          string `json:"id"`
-	Hostname    string `json:"hostname"`
-	IP          string `json:"ip"`
-	OS          string `json:"os"`
-	Width       int    `json:"width"`
-	Height      int    `json:"height"`
-	Status      string `json:"status"` // "online", "pending", "active"
-	ConnectedAt int64  `json:"connected_at"`
+	ID          string
+	Hostname    string
+	IP          string
+	OS          string
+	Width       int
+	Height      int
+	Status      string // "online", "pending", "active"
+	ConnectedAt time.Time
+}
+
+// HubEvents receives asynchronous notifications from the Hub for the desktop UI.
+type HubEvents struct {
+	OnClientsChanged func(clients []ClientInfo)
+	OnSessionPending func(sessionID, clientID, hostname string)
+	OnSessionStarted func(sessionID, clientID, hostname string, width, height int)
+	OnSessionDenied  func(sessionID, clientID, hostname, reason string)
+	OnSessionEnded   func(sessionID, hostname, reason string)
+	OnFrame          func(sessionID string, frameData []byte)
 }
 
 type agentConn struct {
@@ -56,96 +69,81 @@ func (a *agentConn) writeJSON(msgType uint8, v any) error {
 	return protocol.WriteJSON(a.conn, msgType, v)
 }
 
-type viewerConn struct {
-	ws        *ws.Conn
-	sessionID string
-	frameCh   chan []byte
-	done      chan struct{}
-	closeOnce sync.Once
-}
-
-func newViewerConn(c *ws.Conn) *viewerConn {
-	v := &viewerConn{
-		ws:      c,
-		frameCh: make(chan []byte, 4),
-		done:    make(chan struct{}),
-	}
-	go v.framePump()
-	return v
-}
-
-func (v *viewerConn) framePump() {
-	for {
-		select {
-		case <-v.done:
-			return
-		case frame := <-v.frameCh:
-			if err := v.ws.WriteBinary(frame); err != nil {
-				v.Close()
-				return
-			}
-		}
-	}
-}
-
-// QueueFrame enqueues a binary frame for the browser, dropping an older queued frame if congested.
-func (v *viewerConn) QueueFrame(frame []byte) {
-	select {
-	case v.frameCh <- frame:
-	default:
-		select {
-		case <-v.frameCh:
-		default:
-		}
-		select {
-		case v.frameCh <- frame:
-		default:
-		}
-	}
-}
-
-func (v *viewerConn) SendJSON(msg any) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return
-	}
-	if err := v.ws.WriteText(data); err != nil {
-		v.Close()
-	}
-}
-
-func (v *viewerConn) Close() {
-	v.closeOnce.Do(func() {
-		close(v.done)
-		_ = v.ws.Close()
-	})
-}
-
-type sessionState struct {
+type activeSession struct {
 	id       string
 	clientID string
-	viewer   *viewerConn
+	hostname string
 	active   bool
 }
 
-// Hub coordinates TLS agent connections and local Admin UI viewers.
+// Hub manages TLS 1.3 client connections and routes the active remote session directly to the desktop UI.
 type Hub struct {
-	identity *security.ServerIdentity
+	identity  *security.ServerIdentity
+	agentPort int
 
-	mu       sync.RWMutex
-	agents   map[string]*agentConn
-	viewers  map[*viewerConn]struct{}
-	sessions map[string]*sessionState
+	mu      sync.RWMutex
+	events  HubEvents
+	agents  map[string]*agentConn
+	session *activeSession
 }
 
-// NewHub initializes a new Hub.
-func NewHub(identity *security.ServerIdentity) *Hub {
+// NewHub constructs a Hub.
+func NewHub(identity *security.ServerIdentity, agentPort int) *Hub {
 	return &Hub{
-		identity: identity,
-		agents:   make(map[string]*agentConn),
-		viewers:  make(map[*viewerConn]struct{}),
-		sessions: make(map[string]*sessionState),
+		identity:  identity,
+		agentPort: agentPort,
+		agents:    make(map[string]*agentConn),
 	}
+}
+
+// SetEvents registers the desktop UI callbacks.
+func (h *Hub) SetEvents(ev HubEvents) {
+	h.mu.Lock()
+	h.events = ev
+	h.mu.Unlock()
+}
+
+// AgentPort returns the TCP port clients connect to.
+func (h *Hub) AgentPort() int {
+	return h.agentPort
+}
+
+// CertFingerprintShort returns a human-readable prefix of the server TLS SHA-256 fingerprint.
+func (h *Hub) CertFingerprintShort() string {
+	fp := h.identity.CertSHA256
+	if len(fp) < 16 {
+		return fp
+	}
+	upper := strings.ToUpper(fp[:16])
+	var parts []string
+	for i := 0; i < len(upper); i += 4 {
+		parts = append(parts, upper[i:i+4])
+	}
+	return strings.Join(parts, ":") + "…"
+}
+
+// GenerateClientBinary creates a ready-to-run ClienteRemoto.exe embedding the server address,
+// TLS certificate SHA-256 pin, and shared auth token.
+func (h *Hub) GenerateClientBinary(template []byte, serverAddr string) ([]byte, error) {
+	if len(template) == 0 {
+		return nil, errors.New("plantilla de cliente no disponible; compila el proyecto con build.bat")
+	}
+	addr := strings.TrimSpace(serverAddr)
+	if addr == "" {
+		return nil, errors.New("la dirección del servidor es obligatoria")
+	}
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		if !strings.Contains(addr, ":") {
+			addr = net.JoinHostPort(addr, strconv.Itoa(h.agentPort))
+		} else {
+			return nil, fmt.Errorf("formato inválido (usa IP:PUERTO, ej. 192.168.1.50:%d)", h.agentPort)
+		}
+	}
+	return config.AppendToBinary(template, config.ClientConfig{
+		ServerAddr: addr,
+		CertSHA256: h.identity.CertSHA256,
+		AuthToken:  h.identity.AuthToken,
+	})
 }
 
 // ServeAgents accepts TLS 1.3 connections from remote clients until ln is closed.
@@ -228,15 +226,14 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 	h.mu.Lock()
 	h.agents[clientID] = agent
 	h.mu.Unlock()
-	log.Printf("[cliente] conectado: %s (%s) id=%s", agent.hostname, agent.ip, agent.id)
-	h.broadcastClients()
+	log.Printf("[cliente] conectado: %s (%s)", agent.hostname, agent.ip)
+	h.notifyClients()
 
 	defer func() {
 		h.unregisterAgent(agent)
 		log.Printf("[cliente] desconectado: %s (%s)", agent.hostname, agent.ip)
 	}()
 
-	// Main client read loop.
 	for {
 		_ = rawConn.SetReadDeadline(time.Now().Add(35 * time.Second))
 		mType, data, err := protocol.ReadMessage(rawConn)
@@ -249,7 +246,7 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 			_ = agent.writeMessage(protocol.MsgPong, data)
 
 		case protocol.MsgPong:
-			// alive
+			// keepalive ok
 
 		case protocol.MsgConsentResp:
 			var resp protocol.ConsentRespPayload
@@ -263,346 +260,223 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 			h.handleAgentSessionStop(agent, stop)
 
 		case protocol.MsgFrame:
-			h.forwardFrame(agent, data)
+			h.handleAgentFrame(agent, data)
 		}
 	}
 }
 
 func (h *Hub) unregisterAgent(agent *agentConn) {
-	var notifyViewer *viewerConn
-	var endedSID string
-	var hostname string
+	var endedSID, hostname string
+	var onEnded func(string, string, string)
 
 	h.mu.Lock()
 	delete(h.agents, agent.id)
-	if agent.sessionID != "" {
-		if sess, ok := h.sessions[agent.sessionID]; ok {
-			notifyViewer = sess.viewer
-			endedSID = sess.id
-			hostname = agent.hostname
-			if sess.viewer.sessionID == sess.id {
-				sess.viewer.sessionID = ""
-			}
-			delete(h.sessions, agent.sessionID)
-		}
+	if h.session != nil && h.session.clientID == agent.id {
+		endedSID = h.session.id
+		hostname = agent.hostname
+		onEnded = h.events.OnSessionEnded
+		h.session = nil
 	}
 	h.mu.Unlock()
 
-	if notifyViewer != nil {
-		notifyViewer.SendJSON(map[string]any{
-			"type":       "session_ended",
-			"session_id": endedSID,
-			"hostname":   hostname,
-			"reason":     "El equipo se ha desconectado",
-		})
+	if onEnded != nil && endedSID != "" {
+		onEnded(endedSID, hostname, "El equipo se ha desconectado.")
 	}
-	h.broadcastClients()
+	h.notifyClients()
 }
 
 func (h *Hub) handleConsentResp(agent *agentConn, resp protocol.ConsentRespPayload) {
-	var viewer *viewerConn
-	var hostname string
-	var w, ht int
-
 	h.mu.Lock()
-	sess, ok := h.sessions[resp.SessionID]
-	if !ok || sess.clientID != agent.id || agent.sessionID != resp.SessionID {
+	if h.session == nil || h.session.id != resp.SessionID || h.session.clientID != agent.id {
 		h.mu.Unlock()
 		return
 	}
-	viewer = sess.viewer
-	hostname = agent.hostname
-	w, ht = agent.width, agent.height
+	hostname := agent.hostname
+	w, ht := agent.width, agent.height
+	onStarted := h.events.OnSessionStarted
+	onDenied := h.events.OnSessionDenied
 
 	if resp.Allowed {
-		sess.active = true
+		h.session.active = true
 		agent.status = "active"
 	} else {
 		agent.status = "online"
 		agent.sessionID = ""
-		if viewer.sessionID == sess.id {
-			viewer.sessionID = ""
-		}
-		delete(h.sessions, sess.id)
+		h.session = nil
 	}
 	h.mu.Unlock()
 
 	if resp.Allowed {
-		viewer.SendJSON(map[string]any{
-			"type":       "session_started",
-			"session_id": resp.SessionID,
-			"client_id":  agent.id,
-			"hostname":   hostname,
-			"width":      w,
-			"height":     ht,
-		})
+		if onStarted != nil {
+			onStarted(resp.SessionID, agent.id, hostname, w, ht)
+		}
 	} else {
 		reason := resp.Reason
 		if reason == "" {
-			reason = "Solicitud denegada"
+			reason = "Solicitud denegada por el usuario."
 		}
-		viewer.SendJSON(map[string]any{
-			"type":       "session_denied",
-			"session_id": resp.SessionID,
-			"client_id":  agent.id,
-			"hostname":   hostname,
-			"reason":     reason,
-		})
+		if onDenied != nil {
+			onDenied(resp.SessionID, agent.id, hostname, reason)
+		}
 	}
-	h.broadcastClients()
+	h.notifyClients()
 }
 
 func (h *Hub) handleAgentSessionStop(agent *agentConn, stop protocol.SessionStopPayload) {
-	var viewer *viewerConn
-	var sid string
-	var hostname string
-
 	h.mu.Lock()
-	sid = agent.sessionID
-	if sid != "" && (stop.SessionID == "" || stop.SessionID == sid) {
-		if sess, ok := h.sessions[sid]; ok {
-			viewer = sess.viewer
-			hostname = agent.hostname
-			if viewer.sessionID == sid {
-				viewer.sessionID = ""
-			}
-			delete(h.sessions, sid)
-		}
-		agent.sessionID = ""
-		agent.status = "online"
+	if h.session == nil || h.session.clientID != agent.id {
+		h.mu.Unlock()
+		return
 	}
+	if stop.SessionID != "" && stop.SessionID != h.session.id {
+		h.mu.Unlock()
+		return
+	}
+	sid := h.session.id
+	hostname := agent.hostname
+	onEnded := h.events.OnSessionEnded
+	h.session = nil
+	agent.status = "online"
+	agent.sessionID = ""
 	h.mu.Unlock()
 
-	if viewer != nil {
+	if onEnded != nil {
 		reason := stop.Reason
 		if reason == "" {
-			reason = "Sesión finalizada por el equipo remoto"
+			reason = "Sesión finalizada por el equipo remoto."
 		}
-		viewer.SendJSON(map[string]any{
-			"type":       "session_ended",
-			"session_id": sid,
-			"hostname":   hostname,
-			"reason":     reason,
-		})
-		h.broadcastClients()
+		onEnded(sid, hostname, reason)
 	}
+	h.notifyClients()
 }
 
-func (h *Hub) forwardFrame(agent *agentConn, frame []byte) {
+func (h *Hub) handleAgentFrame(agent *agentConn, frame []byte) {
 	h.mu.RLock()
-	sid := agent.sessionID
-	var viewer *viewerConn
-	if sid != "" {
-		if sess, ok := h.sessions[sid]; ok && sess.active {
-			viewer = sess.viewer
-		}
+	var sid string
+	var onFrame func(string, []byte)
+	if h.session != nil && h.session.active && h.session.clientID == agent.id {
+		sid = h.session.id
+		onFrame = h.events.OnFrame
 	}
 	h.mu.RUnlock()
 
-	if viewer != nil {
-		viewer.QueueFrame(frame)
+	if onFrame != nil && sid != "" {
+		onFrame(sid, frame)
 	}
 }
 
-// ServeViewer registers a browser WebSocket viewer and processes its commands until closed.
-func (h *Hub) ServeViewer(c *ws.Conn) {
-	viewer := newViewerConn(c)
-
-	h.mu.Lock()
-	h.viewers[viewer] = struct{}{}
-	clients := h.snapshotClientsLocked()
-	h.mu.Unlock()
-
-	viewer.SendJSON(map[string]any{
-		"type":    "clients_update",
-		"clients": clients,
-	})
-
-	defer func() {
-		h.endViewerSession(viewer, "Administrador desconectado")
-		h.mu.Lock()
-		delete(h.viewers, viewer)
-		h.mu.Unlock()
-		viewer.Close()
-	}()
-
-	for {
-		op, data, err := c.ReadMessage()
-		if err != nil {
-			return
-		}
-
-		if op == ws.OpBinary {
-			h.handleViewerBinaryInput(viewer, data)
-			continue
-		}
-		if op == ws.OpText {
-			h.handleViewerTextCommand(viewer, data)
-		}
-	}
-}
-
-func (h *Hub) handleViewerBinaryInput(viewer *viewerConn, data []byte) {
-	if len(data) < 2 {
-		return
-	}
-	msgType := data[0]
-	payload := data[1:]
-	if msgType != protocol.MsgMouse && msgType != protocol.MsgKey {
-		return
-	}
-
-	h.mu.RLock()
-	sid := viewer.sessionID
-	var agent *agentConn
-	if sid != "" {
-		if sess, ok := h.sessions[sid]; ok && sess.active {
-			agent = h.agents[sess.clientID]
-		}
-	}
-	h.mu.RUnlock()
-
-	if agent != nil {
-		_ = agent.writeMessage(msgType, payload)
-	}
-}
-
-type viewerCmd struct {
-	Type     string `json:"type"`
-	ClientID string `json:"client_id"`
-	Quality  int    `json:"quality"`
-	Keyframe bool   `json:"keyframe"`
-}
-
-func (h *Hub) handleViewerTextCommand(viewer *viewerConn, raw []byte) {
-	var cmd viewerCmd
-	if err := json.Unmarshal(raw, &cmd); err != nil {
-		return
-	}
-
-	switch cmd.Type {
-	case "connect":
-		h.requestConnect(viewer, cmd.ClientID)
-	case "disconnect", "cancel":
-		h.endViewerSession(viewer, "Desconectado por el administrador")
-		viewer.SendJSON(map[string]any{
-			"type":   "session_ended",
-			"reason": "Sesión cerrada",
-		})
-	case "stream_config":
-		h.sendStreamConfig(viewer, cmd.Quality, cmd.Keyframe)
-	}
-}
-
-func (h *Hub) requestConnect(viewer *viewerConn, clientID string) {
-	// Stop any previous session this viewer had.
-	h.endViewerSession(viewer, "Nueva conexión iniciada")
+// RequestConnect sends a consent request to the selected client PC.
+func (h *Hub) RequestConnect(clientID string) error {
+	h.DisconnectSession("Nueva solicitud iniciada")
 
 	sid, err := security.RandomHex(12)
 	if err != nil {
-		return
+		return err
 	}
 
 	h.mu.Lock()
 	agent, ok := h.agents[clientID]
 	if !ok {
 		h.mu.Unlock()
-		viewer.SendJSON(map[string]any{
-			"type":    "error",
-			"message": "El equipo ya no está conectado.",
-		})
-		return
+		return errors.New("el equipo ya no está conectado")
 	}
 	if agent.status != "online" {
 		h.mu.Unlock()
-		viewer.SendJSON(map[string]any{
-			"type":    "error",
-			"message": "El equipo ya tiene una solicitud o sesión activa.",
-		})
-		return
+		return errors.New("el equipo ya tiene una solicitud o sesión activa")
 	}
-
 	agent.status = "pending"
 	agent.sessionID = sid
-	viewer.sessionID = sid
-	h.sessions[sid] = &sessionState{
+	h.session = &activeSession{
 		id:       sid,
 		clientID: agent.id,
-		viewer:   viewer,
+		hostname: agent.hostname,
 		active:   false,
 	}
 	hostname := agent.hostname
+	onPending := h.events.OnSessionPending
 	h.mu.Unlock()
 
 	if err := agent.writeJSON(protocol.MsgConsentReq, protocol.ConsentReqPayload{
 		SessionID:  sid,
 		TimeoutSec: 60,
 	}); err != nil {
-		h.endViewerSession(viewer, "Error de comunicación")
-		viewer.SendJSON(map[string]any{
-			"type":    "error",
-			"message": "No se pudo contactar con el equipo.",
-		})
-		return
+		h.DisconnectSession("Error de red")
+		return errors.New("no se pudo contactar con el equipo")
 	}
 
-	viewer.SendJSON(map[string]any{
-		"type":       "session_pending",
-		"session_id": sid,
-		"client_id":  clientID,
-		"hostname":   hostname,
-	})
-	h.broadcastClients()
+	if onPending != nil {
+		onPending(sid, clientID, hostname)
+	}
+	h.notifyClients()
+	return nil
 }
 
-func (h *Hub) endViewerSession(viewer *viewerConn, reason string) {
-	var agent *agentConn
-	var sid string
-
+// DisconnectSession terminates any active or pending session cleanly.
+func (h *Hub) DisconnectSession(reason string) {
 	h.mu.Lock()
-	sid = viewer.sessionID
-	if sid != "" {
-		viewer.sessionID = ""
-		if sess, ok := h.sessions[sid]; ok {
-			if a, exists := h.agents[sess.clientID]; exists && a.sessionID == sid {
-				a.sessionID = ""
-				a.status = "online"
-				agent = a
-			}
-			delete(h.sessions, sid)
-		}
+	if h.session == nil {
+		h.mu.Unlock()
+		return
+	}
+	sess := h.session
+	h.session = nil
+	var agent *agentConn
+	if a, ok := h.agents[sess.clientID]; ok && a.sessionID == sess.id {
+		a.sessionID = ""
+		a.status = "online"
+		agent = a
 	}
 	h.mu.Unlock()
 
 	if agent != nil {
 		_ = agent.writeJSON(protocol.MsgSessionStop, protocol.SessionStopPayload{
-			SessionID: sid,
+			SessionID: sess.id,
 			Reason:    reason,
 		})
-		h.broadcastClients()
 	}
+	h.notifyClients()
 }
 
-func (h *Hub) sendStreamConfig(viewer *viewerConn, quality int, keyframe bool) {
+// SendMouse forwards a mouse event to the active remote client.
+func (h *Hub) SendMouse(ev protocol.MouseEvent) {
+	agent := h.activeAgent()
+	if agent == nil {
+		return
+	}
+	_ = agent.writeMessage(protocol.MsgMouse, protocol.EncodeMouse(ev))
+}
+
+// SendKey forwards a keyboard event to the active remote client.
+func (h *Hub) SendKey(ev protocol.KeyEvent) {
+	agent := h.activeAgent()
+	if agent == nil {
+		return
+	}
+	_ = agent.writeMessage(protocol.MsgKey, protocol.EncodeKey(ev))
+}
+
+// SendStreamConfig updates JPEG quality or requests a full keyframe on the active client.
+func (h *Hub) SendStreamConfig(quality int, keyframe bool) {
+	agent := h.activeAgent()
+	if agent == nil {
+		return
+	}
+	_ = agent.writeJSON(protocol.MsgStreamConfig, protocol.StreamConfigPayload{
+		Quality:  quality,
+		Keyframe: keyframe,
+	})
+}
+
+func (h *Hub) activeAgent() *agentConn {
 	h.mu.RLock()
-	sid := viewer.sessionID
-	var agent *agentConn
-	if sid != "" {
-		if sess, ok := h.sessions[sid]; ok && sess.active {
-			agent = h.agents[sess.clientID]
-		}
+	defer h.mu.RUnlock()
+	if h.session == nil || !h.session.active {
+		return nil
 	}
-	h.mu.RUnlock()
-
-	if agent != nil {
-		_ = agent.writeJSON(protocol.MsgStreamConfig, protocol.StreamConfigPayload{
-			Quality:  quality,
-			Keyframe: keyframe,
-		})
-	}
+	return h.agents[h.session.clientID]
 }
 
-// ListClients returns a sorted snapshot of currently online clients.
+// ListClients returns a sorted snapshot of all currently connected clients.
 func (h *Hub) ListClients() []ClientInfo {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -620,7 +494,7 @@ func (h *Hub) snapshotClientsLocked() []ClientInfo {
 			Width:       a.width,
 			Height:      a.height,
 			Status:      a.status,
-			ConnectedAt: a.connectedAt.Unix(),
+			ConnectedAt: a.connectedAt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -632,20 +506,82 @@ func (h *Hub) snapshotClientsLocked() []ClientInfo {
 	return out
 }
 
-func (h *Hub) broadcastClients() {
+func (h *Hub) notifyClients() {
 	h.mu.RLock()
+	cb := h.events.OnClientsChanged
 	clients := h.snapshotClientsLocked()
-	viewers := make([]*viewerConn, 0, len(h.viewers))
-	for v := range h.viewers {
-		viewers = append(viewers, v)
-	}
 	h.mu.RUnlock()
+	if cb != nil {
+		cb(clients)
+	}
+}
 
-	msg := map[string]any{
-		"type":    "clients_update",
-		"clients": clients,
+// DetectLocalIPs returns non-loopback IPv4 addresses sorted with private LAN addresses first.
+func DetectLocalIPs() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
 	}
-	for _, v := range viewers {
-		v.SendJSON(msg)
+	type scoredIP struct {
+		ip    string
+		score int
 	}
+	var list []scoredIP
+
+	for _, iface := range ifaces {
+		if (iface.Flags&net.FlagUp) == 0 || (iface.Flags&net.FlagLoopback) != 0 {
+			continue
+		}
+		nameLow := strings.ToLower(iface.Name)
+		isVirtual := strings.Contains(nameLow, "vethernet") ||
+			strings.Contains(nameLow, "vmware") ||
+			strings.Contains(nameLow, "virtualbox") ||
+			strings.Contains(nameLow, "wsl") ||
+			strings.Contains(nameLow, "docker")
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipNet.IP.To4()
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			score := 10
+			if ip4[0] == 192 && ip4[1] == 168 {
+				score = 1
+			} else if ip4[0] == 10 {
+				score = 2
+			} else if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+				score = 3
+			}
+			if isVirtual {
+				score += 20
+			}
+			list = append(list, scoredIP{ip: ip4.String(), score: score})
+		}
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].score != list[j].score {
+			return list[i].score < list[j].score
+		}
+		return list[i].ip < list[j].ip
+	})
+
+	seen := make(map[string]struct{}, len(list))
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		if _, dup := seen[item.ip]; dup {
+			continue
+		}
+		seen[item.ip] = struct{}{}
+		out = append(out, item.ip)
+	}
+	return out
 }

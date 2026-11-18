@@ -1,31 +1,25 @@
+//go:build windows
+
 package main
 
 import (
-	"context"
 	"crypto/tls"
-	"errors"
 	"flag"
 	"fmt"
-	"log"
-	"net"
-	"net/http"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"runtime"
-	"syscall"
-	"time"
 
 	"remote-control/internal/admin"
+	"remote-control/internal/protocol"
 	"remote-control/internal/security"
+	"remote-control/internal/win"
 )
 
 func main() {
+	win.EnableDPIAwareness()
+
 	agentPort := flag.Int("agent-port", 9443, "Puerto TLS 1.3 donde escuchan los clientes")
-	uiPort := flag.Int("ui-port", 8090, "Puerto local (127.0.0.1) para el panel web de administración")
 	dataDir := flag.String("data-dir", "", "Carpeta donde guardar certificados y token (por defecto: ./data junto al ejecutable)")
-	noBrowser := flag.Bool("no-browser", false, "No abrir automáticamente el navegador al iniciar")
 	flag.Parse()
 
 	resolvedDataDir := *dataDir
@@ -39,99 +33,102 @@ func main() {
 
 	identity, err := security.LoadOrCreateIdentity(resolvedDataDir)
 	if err != nil {
-		log.Fatalf("Error inicializando seguridad TLS: %v", err)
+		win.ShowMessageBox(0, "Control Remoto · Error", fmt.Sprintf("No se pudo inicializar el certificado TLS:\n%v", err), true)
+		return
 	}
 
-	uiToken, err := security.RandomHex(24)
-	if err != nil {
-		log.Fatalf("Error generando token de sesión local: %v", err)
-	}
+	hub := admin.NewHub(identity, *agentPort)
 
-	hub := admin.NewHub(identity)
-
-	// Start TLS 1.3 listener for remote clients.
 	agentAddr := fmt.Sprintf("0.0.0.0:%d", *agentPort)
 	agentListener, err := tls.Listen("tcp", agentAddr, security.ServerTLSConfig(identity.Certificate))
 	if err != nil {
-		log.Fatalf("No se pudo abrir el puerto %d para clientes: %v", *agentPort, err)
+		win.ShowMessageBox(0, "Control Remoto · Error", fmt.Sprintf("No se pudo abrir el puerto %d:\n%v\n\nComprueba que no haya otra instancia abierta.", *agentPort, err), true)
+		return
 	}
 	defer agentListener.Close()
 
-	// Bind local Admin UI strictly to 127.0.0.1.
-	uiListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *uiPort))
-	if err != nil {
-		uiListener, err = net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			log.Fatalf("No se pudo abrir el puerto local del panel: %v", err)
-		}
+	// Build suggested LAN addresses for the Generate Client modal.
+	ips := admin.DetectLocalIPs()
+	suggested := make([]string, 0, len(ips)+1)
+	for _, ip := range ips {
+		suggested = append(suggested, fmt.Sprintf("%s:%d", ip, *agentPort))
 	}
-	defer uiListener.Close()
+	suggested = append(suggested, fmt.Sprintf("127.0.0.1:%d", *agentPort))
 
-	actualUIPort := uiListener.Addr().(*net.TCPAddr).Port
-	panelURL := fmt.Sprintf("http://127.0.0.1:%d/?token=%s", actualUIPort, uiToken)
+	template := embeddedClientTemplate()
 
-	webServer := admin.NewWebServer(
-		hub,
-		identity,
-		embeddedClientTemplate(),
-		*agentPort,
-		uiToken,
-		staticWebFS(),
-	)
+	window := win.NewAdminWindow(win.AdminConfig{
+		AgentPort:       *agentPort,
+		SuggestedAddrs:  suggested,
+		CertFingerprint: hub.CertFingerprintShort(),
+	}, win.AdminCallbacks{
+		OnConnect: func(clientID string) error {
+			return hub.RequestConnect(clientID)
+		},
+		OnCancelPending: func() {
+			hub.DisconnectSession("Cancelado por el administrador")
+		},
+		OnDisconnect: func() {
+			hub.DisconnectSession("Desconectado por el administrador")
+		},
+		OnMouse: func(ev protocol.MouseEvent) {
+			hub.SendMouse(ev)
+		},
+		OnKey: func(ev protocol.KeyEvent) {
+			hub.SendKey(ev)
+		},
+		OnQuality: func(quality int) {
+			hub.SendStreamConfig(quality, true)
+		},
+		OnGenerateClient: func(serverAddr, destPath string) error {
+			built, err := hub.GenerateClientBinary(template, serverAddr)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(destPath, built, 0o755)
+		},
+		OnClose: func() {
+			hub.DisconnectSession("Administrador cerrado")
+			_ = agentListener.Close()
+		},
+	})
 
-	httpSrv := &http.Server{
-		Handler:           webServer.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	hub.SetEvents(admin.HubEvents{
+		OnClientsChanged: func(clients []admin.ClientInfo) {
+			rows := make([]win.AdminClientRow, 0, len(clients))
+			for _, c := range clients {
+				rows = append(rows, win.AdminClientRow{
+					ID:       c.ID,
+					Hostname: c.Hostname,
+					IP:       c.IP,
+					Width:    c.Width,
+					Height:   c.Height,
+					Status:   c.Status,
+				})
+			}
+			window.UpdateClients(rows)
+		},
+		OnSessionPending: func(_, _, hostname string) {
+			window.SetPending(hostname)
+		},
+		OnSessionStarted: func(sessionID, _, hostname string, w, h int) {
+			window.OpenSession(sessionID, hostname, w, h)
+		},
+		OnSessionDenied: func(_, _, hostname, reason string) {
+			window.NotifyDenied(hostname, reason)
+		},
+		OnSessionEnded: func(_, hostname, reason string) {
+			window.NotifyEnded(hostname, reason)
+		},
+		OnFrame: func(sessionID string, frameData []byte) {
+			window.PushFrame(sessionID, frameData)
+		},
+	})
 
 	go func() {
-		if err := hub.ServeAgents(agentListener); err != nil {
-			log.Printf("Error en servidor de clientes: %v", err)
-		}
+		<-window.Ready()
+		_ = hub.ServeAgents(agentListener)
 	}()
 
-	go func() {
-		if err := httpSrv.Serve(uiListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("Error en panel web local: %v", err)
-		}
-	}()
-
-	fmt.Println("====================================================")
-	fmt.Println("  Control Remoto · Panel de Administración")
-	fmt.Println("====================================================")
-	fmt.Printf("  Clientes (TLS 1.3): 0.0.0.0:%d\n", *agentPort)
-	if ips := admin.DetectLocalIPs(); len(ips) > 0 {
-		fmt.Printf("  IP sugerida LAN:    %s:%d\n", ips[0], *agentPort)
-	}
-	fmt.Printf("  Panel local:        %s\n", panelURL)
-	fmt.Printf("  Datos TLS/Token:    %s\n", resolvedDataDir)
-	fmt.Println("  Pulsa Ctrl+C para cerrar.")
-	fmt.Println("====================================================")
-
-	if !*noBrowser {
-		openBrowser(panelURL)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
-
-	fmt.Println("\nCerrando servidor...")
-	_ = agentListener.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(ctx)
-}
-
-func openBrowser(targetURL string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL)
-	case "darwin":
-		cmd = exec.Command("open", targetURL)
-	default:
-		cmd = exec.Command("xdg-open", targetURL)
-	}
-	_ = cmd.Start()
+	_ = window.Run()
 }
