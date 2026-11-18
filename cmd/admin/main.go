@@ -134,9 +134,14 @@ func main() {
 			window.SetRelayStatus(connected, detail)
 		},
 		OnClientsChanged: func(clients []protocol.ClientSummary) {
-			rows := make([]win.AdminClientRow, 0, len(clients))
+			clientMu.Lock()
+			activeSet := make(map[string]bool, len(clients))
 			for _, c := range clients {
-				rows = append(rows, win.AdminClientRow{
+				activeSet[c.ID] = true
+				if _, exists := knownClients[c.ID]; !exists {
+					clientOrder = append(clientOrder, c.ID)
+				}
+				knownClients[c.ID] = win.AdminClientRow{
 					ID:           c.ID,
 					CredentialID: c.CredentialID,
 					Hostname:     c.Hostname,
@@ -147,8 +152,16 @@ func main() {
 					Height:       c.Height,
 					MonitorCount: c.MonitorCount,
 					Status:       c.Status,
-				})
+				}
 			}
+			for id, row := range knownClients {
+				if !activeSet[id] {
+					row.Status = "offline"
+					knownClients[id] = row
+				}
+			}
+			rows := buildClientRows()
+			clientMu.Unlock()
 			window.UpdateClients(rows)
 		},
 		OnSessionPending: func(_, _, hostname string) {
