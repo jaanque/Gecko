@@ -228,6 +228,9 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		case "active":
 			dotColor = rgb(24, 24, 27)
 			statusLabel = "En sesión"
+		case "offline":
+			dotColor = rgb(161, 161, 170)
+			statusLabel = "Desconectado"
 		}
 
 		dotSz := a.scale(9)

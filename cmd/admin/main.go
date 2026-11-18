@@ -40,6 +40,39 @@ func main() {
 	prof, hasProf := relayClient.Profile()
 	winTemplate := embeddedClientTemplate()
 
+	var (
+		clientMu     sync.Mutex
+		knownClients = make(map[string]win.AdminClientRow)
+		clientOrder  []string
+	)
+
+	logSessionEvent := func(sessionID, hostname, reason string) {
+		_ = os.MkdirAll(resolvedDataDir, 0o700)
+		logPath := filepath.Join(resolvedDataDir, "sessions.log")
+		line := fmt.Sprintf("%s | Sesión=%s | Equipo=%s | Motivo=%s\n",
+			time.Now().Format("2006-01-02 15:04:05"),
+			sessionID, hostname, reason)
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = f.WriteString(line)
+			_ = f.Close()
+		}
+	}
+
+	buildClientRows := func() []win.AdminClientRow {
+		onlineRows := make([]win.AdminClientRow, 0, len(knownClients))
+		offlineRows := make([]win.AdminClientRow, 0, len(knownClients))
+		for _, id := range clientOrder {
+			row := knownClients[id]
+			if row.Status == "offline" {
+				offlineRows = append(offlineRows, row)
+			} else {
+				onlineRows = append(onlineRows, row)
+			}
+		}
+		return append(onlineRows, offlineRows...)
+	}
+
 	window := win.NewAdminWindow(win.AdminConfig{
 		HasProfile: hasProf,
 		Profile:    prof,
