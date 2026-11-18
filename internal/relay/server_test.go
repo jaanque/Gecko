@@ -144,9 +144,9 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	}
 
 	// Verify generated client binary provisions a UNIQUE revocable client credential (NEVER Admin credentials!).
-	genBin, credID, err := admClient.GenerateClientBinaryWithLabel([]byte("MZ\x90\x00fake-template"), nil, "Equipo-Cliente-1")
+	genBin, credID, err := admClient.GenerateClientBinary([]byte("MZ\x90\x00fake-template"), nil, "Equipo-Cliente-1", "")
 	if err != nil {
-		t.Fatalf("GenerateClientBinaryWithLabel failed: %v", err)
+		t.Fatalf("GenerateClientBinary failed: %v", err)
 	}
 	if credID == "" || credID == security.DefaultClientCredentialID {
 		t.Fatalf("expected unique provisioned credential ID while connected, got %q", credID)
@@ -176,7 +176,6 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 	if err := protocol.WriteJSON(cliConn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    genCfg.AuthToken,
 		Hostname: "PC-REMOTO-EXTERNO",
-		OS:       "linux",
 		Username: "alice",
 		Width:    1920,
 		Height:   1080,
@@ -196,7 +195,7 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 		t.Fatalf("client auth failed: %+v", okResp)
 	}
 
-	// Wait for Admin to see the online PC with OS, Username, and CredentialID populated.
+	// Wait for Admin to see the online PC with Username and CredentialID populated.
 	var target protocol.ClientSummary
 	deadline := time.After(3 * time.Second)
 	for target.ID == "" {
@@ -211,7 +210,7 @@ func TestFullBridgeLifecycleAndRoleIsolation(t *testing.T) {
 			t.Fatal("timed out waiting for client in admin list")
 		}
 	}
-	if target.OS != "linux" || target.Username != "alice" || target.CredentialID != credID {
+	if target.Username != "alice" || target.CredentialID != credID {
 		t.Fatalf("unexpected ClientSummary metadata: %+v", target)
 	}
 

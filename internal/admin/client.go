@@ -209,22 +209,11 @@ func (c *RelayClient) ProvisionClientCredential(label string) (protocol.AdminPro
 	}
 }
 
-// GenerateClientBinary creates a client executable bound to the configured Relay server.
+// GenerateClientBinary creates a client executable bound to the configured Relay server,
+// with optional logo, credential label, and UI language ("ca"|"es"|"en").
 // When connected to the Relay, it provisions a unique revocable client mTLS certificate and token;
 // if offline, it falls back to the shared client credentials stored in RelayProfile (never AdminToken).
-func (c *RelayClient) GenerateClientBinary(template []byte, logoPNG []byte) ([]byte, error) {
-	bin, _, err := c.GenerateClientBinaryWithLabel(template, logoPNG, "")
-	return bin, err
-}
-
-// GenerateClientBinaryWithLabel works like GenerateClientBinary and attaches an optional label
-// to the provisioned per-client credential, returning the binary and issued credential ID.
-func (c *RelayClient) GenerateClientBinaryWithLabel(template []byte, logoPNG []byte, label string) ([]byte, string, error) {
-	return c.GenerateClientBinaryWithOptions(template, logoPNG, label, "")
-}
-
-// GenerateClientBinaryWithOptions builds a configured client binary with optional logo, label, and UI language ("ca"|"es"|"en").
-func (c *RelayClient) GenerateClientBinaryWithOptions(template []byte, logoPNG []byte, label, lang string) ([]byte, string, error) {
+func (c *RelayClient) GenerateClientBinary(template, logoPNG []byte, label, lang string) ([]byte, string, error) {
 	if len(template) == 0 {
 		return nil, "", errors.New("plantilla de cliente no disponible; compila el proyecto con: go run ./cmd/build")
 	}
@@ -614,15 +603,8 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 		_ = tc.SetWriteBuffer(256 * 1024)
 	}
 
-	doneConn := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-doneConn:
-		}
-	}()
-	defer close(doneConn)
+	stopWatch := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopWatch()
 
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := protocol.WriteJSON(conn, protocol.MsgAdminAuth, protocol.AdminAuthPayload{
@@ -651,7 +633,8 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 	c.emitStatus(gen, true, prof.ServerAddr)
 
 	// Periodic heartbeat (every 10s when idle) and end-to-end RTT probe (every 2s during active session).
-	pingDone := make(chan struct{})
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -659,9 +642,7 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 		var ts [8]byte
 		for {
 			select {
-			case <-pingDone:
-				return
-			case <-ctx.Done():
+			case <-connCtx.Done():
 				return
 			case <-ticker.C:
 				ticks++
@@ -683,7 +664,6 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 			}
 		}
 	}()
-	defer close(pingDone)
 
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(35 * time.Second))

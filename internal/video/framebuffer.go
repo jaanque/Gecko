@@ -331,20 +331,6 @@ func blitImageToBGRA(dst []byte, dstW, dstH, tx, ty int, src image.Image) {
 			}
 		}
 
-	case *image.RGBA:
-		for y := 0; y < h; y++ {
-			srcOff := (b.Min.Y+y-img.Rect.Min.Y)*img.Stride + (b.Min.X-img.Rect.Min.X)*4
-			dstOff := (ty+y)*stride + tx*4
-			for x := 0; x < w; x++ {
-				so := srcOff + x*4
-				do := dstOff + x*4
-				dst[do+0] = img.Pix[so+2]
-				dst[do+1] = img.Pix[so+1]
-				dst[do+2] = img.Pix[so+0]
-				dst[do+3] = 255
-			}
-		}
-
 	default:
 		for y := 0; y < h; y++ {
 			dstOff := (ty+y)*stride + tx*4

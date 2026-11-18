@@ -103,6 +103,7 @@ func main() {
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
+		OnClipboard:  agent.onLocalClipboard,
 		OnClose: func() {
 			agent.stopAllSessions(str.ClientClosedReason)
 			cancel()
@@ -141,10 +142,7 @@ func main() {
 
 func (a *clientAgent) runLoop(ctx context.Context) {
 	backoff := time.Second
-	for {
-		if ctx.Err() != nil {
-			return
-		}
+	for ctx.Err() == nil {
 		a.window.SetState(win.UIStateConnecting, a.strings.Connecting)
 
 		err := a.connectAndServe(ctx)
@@ -162,10 +160,12 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 			}
 		}
 
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
 		if backoff < 5*time.Second {
 			backoff += time.Second
@@ -196,15 +196,8 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		_ = tc.SetReadBuffer(256 * 1024)
 	}
 
-	doneConn := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-doneConn:
-		}
-	}()
-	defer close(doneConn)
+	stopWatch := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopWatch()
 
 	winMons := win.EnumMonitors()
 	protoMons := make([]protocol.MonitorInfo, 0, len(winMons))
@@ -225,7 +218,6 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	if err := protocol.WriteJSON(conn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    a.cfg.AuthToken,
 		Hostname: a.hostname,
-		OS:       "windows",
 		Username: a.username,
 		Version:  version.Version,
 		Width:    w,
@@ -254,15 +246,14 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 
 	a.window.SetState(win.UIStateOnline, a.strings.Online)
 
-	pingDone := make(chan struct{})
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-pingDone:
-				return
-			case <-ctx.Done():
+			case <-connCtx.Done():
 				return
 			case <-ticker.C:
 				if err := a.writeMessage(conn, protocol.MsgPing, nil); err != nil {
@@ -272,7 +263,6 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 			}
 		}
 	}()
-	defer close(pingDone)
 
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(35 * time.Second))
@@ -495,12 +485,15 @@ func (a *clientAgent) onUserAllow() {
 		return
 	}
 
+	a.clipMu.Lock()
+	a.lastClipText = win.ReadClipboardText()
+	a.clipMu.Unlock()
+
 	a.injector.SetEnabled(true)
 	a.window.SetState(win.UIStateActive, "")
 	a.monitorIdx.Store(0)
 	a.forceKeyframe.Store(true)
 	go a.streamScreen(streamCtx, conn, sid)
-	go a.syncClipboardLoop(streamCtx, conn)
 }
 
 func (a *clientAgent) onUserDeny() {
@@ -614,36 +607,38 @@ func (a *clientAgent) isSessionActive() bool {
 	return active
 }
 
-func (a *clientAgent) syncClipboardLoop(ctx context.Context, conn net.Conn) {
-	initText := win.ReadClipboardText()
+func (a *clientAgent) onLocalClipboard(text string) {
+	if text == "" || len(text) > protocol.MaxClipboardPayloadSize-64 {
+		return
+	}
+	a.mu.Lock()
+	conn := a.conn
+	active := a.activeID != ""
+	a.mu.Unlock()
+	if !active || conn == nil {
+		return
+	}
+
 	a.clipMu.Lock()
-	a.lastClipText = initText
+	changed := text != a.lastClipText
+	if changed {
+		a.lastClipText = text
+	}
 	a.clipMu.Unlock()
 
-	ticker := time.NewTicker(800 * time.Millisecond)
-	defer ticker.Stop()
+	if changed {
+		_ = a.writeJSON(conn, protocol.MsgClipboard, protocol.ClipboardPayload{Text: text})
+	}
+}
 
-	for {
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
 		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			cur := win.ReadClipboardText()
-			if cur == "" || len(cur) > protocol.MaxClipboardPayloadSize-64 {
-				continue
-			}
-			a.clipMu.Lock()
-			changed := cur != a.lastClipText
-			if changed {
-				a.lastClipText = cur
-			}
-			a.clipMu.Unlock()
-
-			if changed {
-				_ = a.writeJSON(conn, protocol.MsgClipboard, protocol.ClipboardPayload{Text: cur})
-			}
+		case <-t.C:
+		default:
 		}
 	}
+	t.Reset(d)
 }
 
 func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid string) {
@@ -661,14 +656,8 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 	timer := time.NewTimer(frameInterval)
 	defer timer.Stop()
 
-	sleepTimer := func(d time.Duration) bool {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(d)
+	sleep := func(d time.Duration) bool {
+		resetTimer(timer, d)
 		select {
 		case <-ctx.Done():
 			return false
@@ -681,13 +670,7 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 
 	for ctx.Err() == nil {
 		if int32(a.lastSentFrameID.Load()-a.lastAckedFrameID.Load()) >= maxInFlight {
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(300 * time.Millisecond)
+			resetTimer(timer, 300*time.Millisecond)
 			select {
 			case <-ctx.Done():
 				return
@@ -705,7 +688,7 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 		nextID := frameSeq + 1
 		frame, _, _, err := capturer.CaptureFrame(nextID, monIdx, q, force)
 		if err != nil {
-			if !sleepTimer(200 * time.Millisecond) {
+			if !sleep(200 * time.Millisecond) {
 				return
 			}
 			continue
@@ -720,11 +703,8 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 			}
 		}
 
-		wait := frameInterval - time.Since(start)
-		if wait < 2*time.Millisecond {
-			wait = 2 * time.Millisecond
-		}
-		if !sleepTimer(wait) {
+		wait := max(frameInterval-time.Since(start), 2*time.Millisecond)
+		if !sleep(wait) {
 			return
 		}
 	}

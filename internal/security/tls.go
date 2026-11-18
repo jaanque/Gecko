@@ -74,6 +74,10 @@ func (p RelayProfile) Validate() error {
 	if strings.TrimSpace(p.ServerAddr) == "" {
 		return errors.New("la dirección del servidor es obligatoria")
 	}
+	return p.validateCredentials()
+}
+
+func (p RelayProfile) validateCredentials() error {
 	if _, err := decodeSHA256Hex(p.CertSHA256); err != nil {
 		return errors.New("la huella TLS SHA-256 debe tener 64 caracteres hexadecimales")
 	}
@@ -138,14 +142,8 @@ func DecodeProfileKey(key string) (RelayProfile, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return RelayProfile{}, errors.New("clave de servidor corrupta")
 	}
-	if _, err := decodeSHA256Hex(p.CertSHA256); err != nil || len(p.AdminToken) < 32 || len(p.ClientToken) < 32 {
-		return RelayProfile{}, errors.New("la clave no contiene credenciales válidas")
-	}
-	if _, err := ParseDERKeyPair(p.AdminCertDER, p.AdminKeyDER); err != nil {
-		return RelayProfile{}, errors.New("la clave no contiene certificado mTLS de administrador válido")
-	}
-	if _, err := ParseDERKeyPair(p.ClientCertDER, p.ClientKeyDER); err != nil {
-		return RelayProfile{}, errors.New("la clave no contiene certificado mTLS de cliente válido")
+	if err := p.validateCredentials(); err != nil {
+		return RelayProfile{}, err
 	}
 	return p, nil
 }
@@ -351,13 +349,6 @@ func PeerIdentityFromTLS(rawConn net.Conn) (string, *x509.Certificate, error) {
 		return RoleClient, leaf, nil
 	}
 	return "", nil, fmt.Errorf("unknown mTLS client role: %q", cn)
-}
-
-// PeerRoleFromTLS inspects a live server-side mTLS connection and returns the verified
-// role ("admin" or "client"). Returns an error if mTLS was not verified.
-func PeerRoleFromTLS(rawConn net.Conn) (string, error) {
-	role, _, err := PeerIdentityFromTLS(rawConn)
-	return role, err
 }
 
 // ParseDERKeyPair reconstructs a tls.Certificate from DER-encoded certificate and EC private key bytes.

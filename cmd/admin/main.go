@@ -82,7 +82,7 @@ func main() {
 		},
 		OnGenerateClient: func(logoPNG []byte, lang string, destPath string) error {
 			label := filepath.Base(destPath)
-			built, _, err := relayClient.GenerateClientBinaryWithOptions(winTemplate, logoPNG, label, lang)
+			built, _, err := relayClient.GenerateClientBinary(winTemplate, logoPNG, label, lang)
 			if err != nil {
 				return err
 			}

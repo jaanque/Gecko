@@ -102,7 +102,6 @@ type MonitorInfo struct {
 type AuthPayload struct {
 	Token    string        `json:"token"`
 	Hostname string        `json:"hostname"`
-	OS       string        `json:"os,omitempty"`
 	Username string        `json:"username,omitempty"`
 	Version  string        `json:"version,omitempty"`
 	Width    int           `json:"width"`
@@ -148,7 +147,6 @@ type ClientSummary struct {
 	ID           string `json:"id"`
 	CredentialID string `json:"credential_id,omitempty"`
 	Hostname     string `json:"hostname"`
-	OS           string `json:"os,omitempty"`
 	Username     string `json:"username,omitempty"`
 	Version      string `json:"version,omitempty"`
 	IP           string `json:"ip"`
@@ -439,11 +437,12 @@ func WriteMessage(w io.Writer, msgType uint8, payload []byte) error {
 	var hdr [HeaderSize]byte
 	hdr[0] = msgType
 	binary.BigEndian.PutUint32(hdr[1:5], uint32(len(payload)))
-	if err := writeAll(w, hdr[:]); err != nil {
+	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
 	if len(payload) > 0 {
-		return writeAll(w, payload)
+		_, err := w.Write(payload)
+		return err
 	}
 	return nil
 }
@@ -481,18 +480,4 @@ func ReadMessage(r io.Reader) (uint8, []byte, error) {
 		return 0, nil, err
 	}
 	return msgType, payload, nil
-}
-
-func writeAll(w io.Writer, b []byte) error {
-	for len(b) > 0 {
-		n, err := w.Write(b)
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-		b = b[n:]
-	}
-	return nil
 }

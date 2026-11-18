@@ -37,7 +37,7 @@ func TestRelayClientProfilePersistenceAndOfflineGeneration(t *testing.T) {
 		t.Fatal("expected no profile initially")
 	}
 
-	if _, err := rc.GenerateClientBinary([]byte("MZ-stub"), nil); err == nil {
+	if _, _, err := rc.GenerateClientBinary([]byte("MZ-stub"), nil, "", ""); err == nil {
 		t.Fatal("expected error generating client before server is configured")
 	}
 
@@ -63,9 +63,9 @@ func TestRelayClientProfilePersistenceAndOfflineGeneration(t *testing.T) {
 		t.Fatalf("reloaded profile mismatch: ok=%v got=%+v", ok, gotProf)
 	}
 
-	bin, credID, err := rc2.GenerateClientBinaryWithLabel([]byte("MZ\x90\x00stub"), nil, "offline")
+	bin, credID, err := rc2.GenerateClientBinary([]byte("MZ\x90\x00stub"), nil, "offline", "")
 	if err != nil {
-		t.Fatalf("offline GenerateClientBinaryWithLabel failed: %v", err)
+		t.Fatalf("offline GenerateClientBinary failed: %v", err)
 	}
 	if credID != security.DefaultClientCredentialID {
 		t.Fatalf("expected fallback default credential ID when offline, got %q", credID)

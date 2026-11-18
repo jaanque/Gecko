@@ -2,13 +2,9 @@
 
 package win
 
-import "syscall"
-
 var (
-	user32DPI = syscall.NewLazyDLL("user32.dll")
-
-	procSetProcessDpiAwarenessContext = user32DPI.NewProc("SetProcessDpiAwarenessContext")
-	procSetProcessDPIAware            = user32DPI.NewProc("SetProcessDPIAware")
+	procSetProcessDpiAwarenessContext = user32GUI.NewProc("SetProcessDpiAwarenessContext")
+	procSetProcessDPIAware            = user32GUI.NewProc("SetProcessDPIAware")
 )
 
 // EnableDPIAwareness configures the process as Per-Monitor DPI Aware v2

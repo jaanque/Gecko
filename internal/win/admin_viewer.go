@@ -22,13 +22,10 @@ var (
 	procGetWindowPlacement = user32GUI.NewProc("GetWindowPlacement")
 	procSetWindowPlacement = user32GUI.NewProc("SetWindowPlacement")
 	procMonitorFromWindow  = user32GUI.NewProc("MonitorFromWindow")
-	procGetMonitorInfoW    = user32GUI.NewProc("GetMonitorInfoW")
 	procSetCapture         = user32GUI.NewProc("SetCapture")
 	procReleaseCapture     = user32GUI.NewProc("ReleaseCapture")
 	procSetFocus           = user32GUI.NewProc("SetFocus")
 	procSetCursor          = user32GUI.NewProc("SetCursor")
-	procGetWindowLongW     = user32GUI.NewProc("GetWindowLongW")
-	procSetWindowLongW     = user32GUI.NewProc("SetWindowLongW")
 	procGetForegroundWin   = user32GUI.NewProc("GetForegroundWindow")
 	procGetAsyncKeyState   = user32GUI.NewProc("GetAsyncKeyState")
 	procSetWindowsHookExW  = user32GUI.NewProc("SetWindowsHookExW")
@@ -355,9 +352,14 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 	// go cleanly to the remote PC whenever this viewer window has foreground focus.
 	v.installKeyboardHook()
 
+	// Snapshot current clipboard and subscribe to native WM_CLIPBOARDUPDATE events (zero polling).
+	v.clipMu.Lock()
+	v.lastClipText = ReadClipboardText()
+	v.clipMu.Unlock()
+	addClipboardListener(hwnd)
+
 	go v.decodeLoop(sessionID, fCh, fEnd)
 	go v.inputLoop(inCh, mvCh, inDone)
-	go v.clipboardLoop(fEnd)
 
 	procShowWindow.Call(hwnd, swShowNormal)
 	procUpdateWindow.Call(hwnd)
@@ -375,6 +377,23 @@ func (v *remoteViewer) ApplyRemoteClipboard(text string) {
 	_ = WriteClipboardText(text)
 }
 
+func (v *remoteViewer) onLocalClipboardChanged() {
+	cur := ReadClipboardText()
+	if cur == "" {
+		return
+	}
+	v.clipMu.Lock()
+	changed := cur != v.lastClipText
+	if changed {
+		v.lastClipText = cur
+	}
+	v.clipMu.Unlock()
+
+	if changed && v.cb.OnClipboard != nil {
+		v.cb.OnClipboard(cur)
+	}
+}
+
 // SetFileStatus displays a brief transfer status notice in the viewer toolbar.
 func (v *remoteViewer) SetFileStatus(_ string, _ bool, detail string) {
 	v.mu.Lock()
@@ -384,39 +403,6 @@ func (v *remoteViewer) SetFileStatus(_ string, _ bool, detail string) {
 	v.mu.Unlock()
 	if hwnd != 0 {
 		procPostMessageW.Call(hwnd, wmViewerFrame, 0, 0)
-	}
-}
-
-func (v *remoteViewer) clipboardLoop(done <-chan struct{}) {
-	// Snapshot current local clipboard so we don't immediately push stale text on session start.
-	initText := ReadClipboardText()
-	v.clipMu.Lock()
-	v.lastClipText = initText
-	v.clipMu.Unlock()
-
-	ticker := time.NewTicker(700 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-done:
-			return
-		case <-ticker.C:
-			cur := ReadClipboardText()
-			if cur == "" {
-				continue
-			}
-			v.clipMu.Lock()
-			changed := cur != v.lastClipText
-			if changed {
-				v.lastClipText = cur
-			}
-			v.clipMu.Unlock()
-
-			if changed && v.cb.OnClipboard != nil {
-				v.cb.OnClipboard(cur)
-			}
-		}
 	}
 }
 
@@ -453,6 +439,7 @@ func (v *remoteViewer) CloseUI() {
 		close(inDone)
 	}
 	if hwnd != 0 {
+		removeClipboardListener(hwnd)
 		procDestroyWindow.Call(hwnd)
 	}
 	v.releaseBackbuffer()
@@ -1415,111 +1402,54 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		if v.isInCollapsedPill(x, y) {
 			return 0
 		}
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.mouseBtns++
-			procSetCapture.Call(hwnd)
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseDown, Button: protocol.ButtonLeft, X: nx, Y: ny}})
-		}
+		v.handleMouseDown(hwnd, protocol.ButtonLeft, x, y)
 		return 0
 
 	case wmLButtonUp:
-		x, y := unpackXY(lParam)
-		if v.mouseBtns > 0 {
-			v.mouseBtns--
-			if v.mouseBtns == 0 {
-				procReleaseCapture.Call()
-			}
-		}
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseUp, Button: protocol.ButtonLeft, X: nx, Y: ny}})
-		}
+		v.handleMouseUp(protocol.ButtonLeft, lParam)
 		return 0
 
 	case wmRButtonDown:
 		x, y := unpackXY(lParam)
 		procSetFocus.Call(hwnd)
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.mouseBtns++
-			procSetCapture.Call(hwnd)
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseDown, Button: protocol.ButtonRight, X: nx, Y: ny}})
-		}
+		v.handleMouseDown(hwnd, protocol.ButtonRight, x, y)
 		return 0
 
 	case wmRButtonUp:
-		x, y := unpackXY(lParam)
-		if v.mouseBtns > 0 {
-			v.mouseBtns--
-			if v.mouseBtns == 0 {
-				procReleaseCapture.Call()
-			}
-		}
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseUp, Button: protocol.ButtonRight, X: nx, Y: ny}})
-		}
+		v.handleMouseUp(protocol.ButtonRight, lParam)
 		return 0
 
 	case wmMButtonDown:
 		x, y := unpackXY(lParam)
 		procSetFocus.Call(hwnd)
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.mouseBtns++
-			procSetCapture.Call(hwnd)
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseDown, Button: protocol.ButtonMiddle, X: nx, Y: ny}})
-		}
+		v.handleMouseDown(hwnd, protocol.ButtonMiddle, x, y)
 		return 0
 
 	case wmMButtonUp:
-		x, y := unpackXY(lParam)
-		if v.mouseBtns > 0 {
-			v.mouseBtns--
-			if v.mouseBtns == 0 {
-				procReleaseCapture.Call()
-			}
-		}
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseUp, Button: protocol.ButtonMiddle, X: nx, Y: ny}})
-		}
+		v.handleMouseUp(protocol.ButtonMiddle, lParam)
 		return 0
 
 	case wmXButtonDown:
 		x, y := unpackXY(lParam)
 		procSetFocus.Call(hwnd)
-		btn := uint8(protocol.ButtonX1)
-		if ((wParam >> 16) & 0xFFFF) == xButton2 {
-			btn = protocol.ButtonX2
-		}
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.mouseBtns++
-			procSetCapture.Call(hwnd)
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseDown, Button: btn, X: nx, Y: ny}})
-		}
+		v.handleMouseDown(hwnd, xButtonFromWParam(wParam), x, y)
 		return 1
 
 	case wmXButtonUp:
-		x, y := unpackXY(lParam)
-		if v.mouseBtns > 0 {
-			v.mouseBtns--
-			if v.mouseBtns == 0 {
-				procReleaseCapture.Call()
-			}
-		}
-		btn := uint8(protocol.ButtonX1)
-		if ((wParam >> 16) & 0xFFFF) == xButton2 {
-			btn = protocol.ButtonX2
-		}
-		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
-			v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseUp, Button: btn, X: nx, Y: ny}})
-		}
+		v.handleMouseUp(xButtonFromWParam(wParam), lParam)
 		return 1
 
-	case wmMouseWheel:
+	case wmMouseWheel, wmMouseHWheel:
+		action := uint8(protocol.MouseWheel)
+		if msg == wmMouseHWheel {
+			action = protocol.MouseHWheel
+		}
 		delta := int16(uint16((wParam >> 16) & 0xFFFF))
-		v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseWheel, Delta: delta}})
+		v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: action, Delta: delta}})
 		return 0
 
-	case wmMouseHWheel:
-		delta := int16(uint16((wParam >> 16) & 0xFFFF))
-		v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseHWheel, Delta: delta}})
+	case wmClipboardUpdate:
+		go v.onLocalClipboardChanged()
 		return 0
 
 	case wmKeyDown, wmSysKeyDown:
@@ -1551,6 +1481,34 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	return ret
 }
 
+func (v *remoteViewer) handleMouseDown(hwnd uintptr, btn uint8, x, y int32) {
+	if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
+		v.mouseBtns++
+		procSetCapture.Call(hwnd)
+		v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseDown, Button: btn, X: nx, Y: ny}})
+	}
+}
+
+func (v *remoteViewer) handleMouseUp(btn uint8, lParam uintptr) {
+	x, y := unpackXY(lParam)
+	if v.mouseBtns > 0 {
+		v.mouseBtns--
+		if v.mouseBtns == 0 {
+			procReleaseCapture.Call()
+		}
+	}
+	if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
+		v.enqueueOrderedInput(queuedInput{mouse: protocol.MouseEvent{Action: protocol.MouseUp, Button: btn, X: nx, Y: ny}})
+	}
+}
+
+func xButtonFromWParam(wParam uintptr) uint8 {
+	if ((wParam >> 16) & 0xFFFF) == xButton2 {
+		return protocol.ButtonX2
+	}
+	return protocol.ButtonX1
+}
+
 func unpackXY(lParam uintptr) (int32, int32) {
 	x := int32(int16(lParam & 0xFFFF))
 	y := int32(int16((lParam >> 16) & 0xFFFF))
@@ -1558,20 +1516,12 @@ func unpackXY(lParam uintptr) (int32, int32) {
 }
 
 func getWindowStyle(hwnd uintptr) uintptr {
-	if err := procGetWindowLongPtrW.Find(); err == nil {
-		r, _, _ := procGetWindowLongPtrW.Call(hwnd, gwlStyle)
-		return r
-	}
-	r, _, _ := procGetWindowLongW.Call(hwnd, gwlStyle)
+	r, _, _ := procGetWindowLongPtrW.Call(hwnd, gwlStyle)
 	return r
 }
 
 func setWindowStyle(hwnd uintptr, style uintptr) {
-	if err := procSetWindowLongPtrW.Find(); err == nil {
-		procSetWindowLongPtrW.Call(hwnd, gwlStyle, style)
-		return
-	}
-	procSetWindowLongW.Call(hwnd, gwlStyle, style)
+	procSetWindowLongPtrW.Call(hwnd, gwlStyle, style)
 }
 
 func fillSolidRect(hdc uintptr, rc rect, color uintptr) {
@@ -1590,20 +1540,7 @@ func drawLine(hdc uintptr, x1, y1, x2, y2 int32, color uintptr) {
 }
 
 func drawFlatButton(hdc uintptr, rc rect, radius int32, bg, border, fg uintptr, label string) {
-	br, _, _ := procCreateSolidBrush.Call(bg)
-	pen, _, _ := procCreatePen.Call(psSolid, 1, border)
-	oldBr, _, _ := procSelectObject.Call(hdc, br)
-	oldPen, _, _ := procSelectObject.Call(hdc, pen)
-	procRoundRect.Call(
-		hdc,
-		uintptr(rc.Left), uintptr(rc.Top), uintptr(rc.Right), uintptr(rc.Bottom),
-		uintptr(radius), uintptr(radius),
-	)
-	procSelectObject.Call(hdc, oldBr)
-	procSelectObject.Call(hdc, oldPen)
-	procDeleteObject.Call(br)
-	procDeleteObject.Call(pen)
-
+	drawRoundedCard(hdc, rc, radius, bg, border)
 	procSetTextColor.Call(hdc, fg)
 	r := rc
 	drawText(hdc, label, &r, dtCenter|dtSingleLn|dtVCenter)

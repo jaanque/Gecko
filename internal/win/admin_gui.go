@@ -22,11 +22,6 @@ var (
 	procGetWindowTextW    = user32GUI.NewProc("GetWindowTextW")
 	procGetWindowTextLenW = user32GUI.NewProc("GetWindowTextLengthW")
 	procSetWindowTextW    = user32GUI.NewProc("SetWindowTextW")
-	procOpenClipboard     = user32GUI.NewProc("OpenClipboard")
-	procGetClipboardData  = user32GUI.NewProc("GetClipboardData")
-	procCloseClipboard    = user32GUI.NewProc("CloseClipboard")
-	procGlobalLock        = kernel32GUI.NewProc("GlobalLock")
-	procGlobalUnlock      = kernel32GUI.NewProc("GlobalUnlock")
 )
 
 const (
@@ -40,8 +35,6 @@ const (
 	wsTabStop      = 0x00010000
 	esAutoHScroll  = 0x0080
 	wsExClientEdge = 0x00000200
-
-	cfUnicodeText = 13
 
 	enChange      = 0x0300
 	emSetCueBaner = 0x1501
@@ -1242,16 +1235,8 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 		a.logoName = ""
 		procInvalidateRect.Call(hwnd, 0, 0)
 
-	case "lang_ca":
-		a.clientLang = "ca"
-		procInvalidateRect.Call(hwnd, 0, 0)
-
-	case "lang_es":
-		a.clientLang = "es"
-		procInvalidateRect.Call(hwnd, 0, 0)
-
-	case "lang_en":
-		a.clientLang = "en"
+	case "lang_ca", "lang_es", "lang_en":
+		a.clientLang = strings.TrimPrefix(hit.kind, "lang_")
 		procInvalidateRect.Call(hwnd, 0, 0)
 
 	case "save_client_win":
@@ -1570,39 +1555,4 @@ func setControlText(hwnd uintptr, s string) {
 		return
 	}
 	procSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(u16)))
-}
-
-func readTextFromClipboard(hwnd uintptr) string {
-	if ok, _, _ := procOpenClipboard.Call(hwnd); ok == 0 {
-		return ""
-	}
-	defer procCloseClipboard.Call()
-
-	hMem, _, _ := procGetClipboardData.Call(cfUnicodeText)
-	if hMem == 0 {
-		return ""
-	}
-	locked, _, _ := procGlobalLock.Call(hMem)
-	if locked == 0 {
-		return ""
-	}
-	defer procGlobalUnlock.Call(hMem)
-
-	ptr := *(*unsafe.Pointer)(unsafe.Pointer(&locked))
-	maxUnits := maxClipUTF16Len
-	if sz, _, _ := procGlobalSize.Call(hMem); sz > 0 {
-		units := int(sz / 2)
-		if units < maxUnits {
-			maxUnits = units
-		}
-	}
-	if maxUnits <= 0 {
-		return ""
-	}
-	u16 := unsafe.Slice((*uint16)(ptr), maxUnits)
-	end := 0
-	for end < len(u16) && u16[end] != 0 {
-		end++
-	}
-	return syscall.UTF16ToString(u16[:end])
 }

@@ -92,36 +92,27 @@ func ShowSaveExeDialog(ownerHwnd uintptr, defaultFileName string) (string, bool)
 // ShowOpenLogoDialog opens the native Windows file picker for a PNG/JPEG logo image.
 // Returns ("", false) if the user cancels.
 func ShowOpenLogoDialog(ownerHwnd uintptr) (string, bool) {
-	fileBuf := make([]uint16, 4096)
-	filterStr := "Imágenes (*.png;*.jpg;*.jpeg)\x00*.png;*.jpg;*.jpeg\x00Todos los archivos (*.*)\x00*.*\x00\x00"
-	filterUTF16 := utf16WithNulls(filterStr)
-	titleUTF16, _ := syscall.UTF16PtrFromString("Seleccionar logo del cliente")
-
-	ofn := openFileNameW{
-		LStructSize:  uint32(unsafe.Sizeof(openFileNameW{})),
-		HwndOwner:    ownerHwnd,
-		LpstrFilter:  &filterUTF16[0],
-		NFilterIndex: 1,
-		LpstrFile:    &fileBuf[0],
-		NMaxFile:     uint32(len(fileBuf)),
-		LpstrTitle:   titleUTF16,
-		Flags:        ofnFileMustExist | ofnPathMustExist | ofnNoChangeDir | ofnExplorer,
-	}
-
-	ok, _, _ := procGetOpenFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
-	if ok == 0 {
-		return "", false
-	}
-	return syscall.UTF16ToString(fileBuf), true
+	return showOpenFileDialog(
+		ownerHwnd,
+		"Seleccionar logo del cliente",
+		"Imágenes (*.png;*.jpg;*.jpeg)\x00*.png;*.jpg;*.jpeg\x00Todos los archivos (*.*)\x00*.*\x00\x00",
+	)
 }
 
 // ShowOpenAnyFileDialog opens the native Windows file picker for sending a file to a remote client.
 // Returns ("", false) if the user cancels.
 func ShowOpenAnyFileDialog(ownerHwnd uintptr) (string, bool) {
+	return showOpenFileDialog(
+		ownerHwnd,
+		"Enviar archivo al equipo remoto",
+		"Todos los archivos (*.*)\x00*.*\x00\x00",
+	)
+}
+
+func showOpenFileDialog(ownerHwnd uintptr, title, filterStr string) (string, bool) {
 	fileBuf := make([]uint16, 4096)
-	filterStr := "Todos los archivos (*.*)\x00*.*\x00\x00"
 	filterUTF16 := utf16WithNulls(filterStr)
-	titleUTF16, _ := syscall.UTF16PtrFromString("Enviar archivo al equipo remoto")
+	titleUTF16, _ := syscall.UTF16PtrFromString(title)
 
 	ofn := openFileNameW{
 		LStructSize:  uint32(unsafe.Sizeof(openFileNameW{})),

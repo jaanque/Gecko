@@ -51,7 +51,6 @@ type clientPeer struct {
 	id           string
 	credentialID string
 	hostname     string
-	os           string
 	username     string
 	version      string
 	ip           string
@@ -325,7 +324,6 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 	if hostname == "" {
 		hostname = "EQUIPO-" + clientID[:4]
 	}
-	osName := sanitizeOS(auth.OS)
 	username := sanitizeText(auth.Username, maxUsernameRunes)
 	clientVer := sanitizeText(auth.Version, 32)
 
@@ -349,7 +347,6 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 		id:           clientID,
 		credentialID: credID,
 		hostname:     hostname,
-		os:           osName,
 		username:     username,
 		version:      clientVer,
 		ip:           ip,
@@ -369,7 +366,7 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 	s.mu.Lock()
 	s.clients[clientID] = cp
 	s.mu.Unlock()
-	log.Printf("[cliente] conectado: %s os=%s user=%s (%s) id=%s cred=%s", cp.hostname, cp.os, cp.username, cp.ip, cp.id, cp.credentialID)
+	log.Printf("[cliente] conectado: %s user=%s (%s) id=%s cred=%s", cp.hostname, cp.username, cp.ip, cp.id, cp.credentialID)
 	s.broadcastClientList()
 
 	defer func() {
@@ -390,9 +387,7 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 
 		case protocol.MsgPong:
 			if len(data) == 8 {
-				if adm := s.activeAdminForClient(cp); adm != nil {
-					_ = adm.writeMessage(protocol.MsgPong, data)
-				}
+				s.forwardToAdmin(cp, protocol.MsgPong, data)
 			}
 
 		case protocol.MsgConsentResp:
@@ -407,32 +402,24 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 			s.handleClientSessionStop(cp, stop)
 
 		case protocol.MsgFrame:
-			if adm := s.activeAdminForClient(cp); adm != nil {
-				_ = adm.writeMessage(protocol.MsgFrame, data)
-			}
+			s.forwardToAdmin(cp, protocol.MsgFrame, data)
 
 		case protocol.MsgClipboard:
 			var clip protocol.ClipboardPayload
 			if json.Unmarshal(data, &clip) == nil {
-				if adm := s.activeAdminForClient(cp); adm != nil {
-					_ = adm.writeMessage(protocol.MsgClipboard, data)
-				}
+				s.forwardToAdmin(cp, protocol.MsgClipboard, data)
 			}
 
 		case protocol.MsgFileAccept:
 			var fa protocol.FileAcceptPayload
 			if json.Unmarshal(data, &fa) == nil {
-				if adm := s.activeAdminForClient(cp); adm != nil {
-					_ = adm.writeMessage(protocol.MsgFileAccept, data)
-				}
+				s.forwardToAdmin(cp, protocol.MsgFileAccept, data)
 			}
 
 		case protocol.MsgFileDone:
 			var fd protocol.FileDonePayload
 			if json.Unmarshal(data, &fd) == nil {
-				if adm := s.activeAdminForClient(cp); adm != nil {
-					_ = adm.writeMessage(protocol.MsgFileDone, data)
-				}
+				s.forwardToAdmin(cp, protocol.MsgFileDone, data)
 			}
 		}
 	}
@@ -535,70 +522,52 @@ func (s *Server) serveAdmin(rawConn net.Conn, payload []byte) {
 
 		case protocol.MsgFrameAck:
 			if _, err := protocol.DecodeFrameAck(data); err == nil {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgMouse:
 			if _, err := protocol.DecodeMouse(data); err == nil {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgKey:
 			if _, err := protocol.DecodeKey(data); err == nil {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgStreamConfig:
 			var sc protocol.StreamConfigPayload
 			if json.Unmarshal(data, &sc) == nil {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgClipboard:
 			var clip protocol.ClipboardPayload
 			if json.Unmarshal(data, &clip) == nil {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgSystemAction:
 			var sa protocol.SystemActionPayload
 			if json.Unmarshal(data, &sa) == nil && sa.Action != "" {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgFileOffer:
 			var fo protocol.FileOfferPayload
 			if json.Unmarshal(data, &fo) == nil && fo.TransferID != "" && fo.Size >= 0 && fo.Size <= protocol.MaxFileTransferSize {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgFileChunk:
 			if _, err := protocol.DecodeFileChunk(data); err == nil {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 
 		case protocol.MsgFileDone:
 			var fd protocol.FileDonePayload
 			if json.Unmarshal(data, &fd) == nil && fd.TransferID != "" {
-				if cp := s.activeClientForAdmin(ap); cp != nil {
-					_ = cp.writeMessage(mType, data)
-				}
+				s.forwardToClient(ap, mType, data)
 			}
 		}
 	}
@@ -896,6 +865,18 @@ func logSessionEnded(sid, hostname string, startedAt time.Time, reason string) {
 	}
 }
 
+func (s *Server) forwardToAdmin(cp *clientPeer, msgType uint8, data []byte) {
+	if adm := s.activeAdminForClient(cp); adm != nil {
+		_ = adm.writeMessage(msgType, data)
+	}
+}
+
+func (s *Server) forwardToClient(ap *adminPeer, msgType uint8, data []byte) {
+	if cp := s.activeClientForAdmin(ap); cp != nil {
+		_ = cp.writeMessage(msgType, data)
+	}
+}
+
 func (s *Server) activeAdminForClient(cp *clientPeer) *adminPeer {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -927,7 +908,6 @@ func (s *Server) snapshotClientsLocked() []protocol.ClientSummary {
 			ID:           c.id,
 			CredentialID: c.credentialID,
 			Hostname:     c.hostname,
-			OS:           c.os,
 			Username:     c.username,
 			Version:      c.version,
 			IP:           c.ip,
@@ -982,17 +962,4 @@ func sanitizeText(raw string, maxRunes int) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
-}
-
-func sanitizeOS(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "windows":
-		return "windows"
-	case "linux":
-		return "linux"
-	case "darwin", "macos":
-		return "macos"
-	default:
-		return ""
-	}
 }

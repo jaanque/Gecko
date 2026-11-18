@@ -18,10 +18,9 @@ var (
 )
 
 const (
-	d3dDriverTypeUnknown  = 0
-	d3dDriverTypeHardware = 1
-	d3d11SDKVersion       = 7
-	d3dFeatureLevel11_0   = 0xb000
+	d3dDriverTypeUnknown = 0
+	d3d11SDKVersion      = 7
+	d3dFeatureLevel11_0  = 0xb000
 
 	d3d11UsageStaging      = 3
 	d3d11CPUAccessRead     = 0x20000
@@ -143,14 +142,14 @@ func ptrFromUintptr(addr uintptr) unsafe.Pointer {
 	return *(*unsafe.Pointer)(unsafe.Pointer(&addr))
 }
 
-// comVtblCall invokes method slot idx on COM object ptr.
+// comVtblCall invokes method slot idx on COM object ptr without heap allocations.
 func comVtblCall(obj uintptr, idx uintptr, args ...uintptr) uintptr {
 	vtbl := *(*uintptr)(ptrFromUintptr(obj))
 	fn := *(*uintptr)(unsafe.Add(ptrFromUintptr(vtbl), idx*unsafe.Sizeof(uintptr(0))))
-	callArgs := make([]uintptr, 0, len(args)+1)
-	callArgs = append(callArgs, obj)
-	callArgs = append(callArgs, args...)
-	r1, _, _ := syscall.SyscallN(fn, callArgs...)
+	var callArgs [12]uintptr
+	callArgs[0] = obj
+	n := 1 + copy(callArgs[1:], args)
+	r1, _, _ := syscall.SyscallN(fn, callArgs[:n]...)
 	return r1
 }
 

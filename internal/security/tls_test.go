@@ -77,7 +77,7 @@ func TestMutualTLSHandshakeAndProfileKey(t *testing.T) {
 				if err := conn.Handshake(); err != nil {
 					return
 				}
-				if role, err := PeerRoleFromTLS(conn); err == nil {
+				if role, _, err := PeerIdentityFromTLS(conn); err == nil {
 					roleCh <- role
 				}
 			}(c.(*tls.Conn))

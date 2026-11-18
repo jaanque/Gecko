@@ -121,6 +121,7 @@ type ClientCallbacks struct {
 	OnAllow      func()
 	OnDeny       func()
 	OnDisconnect func()
+	OnClipboard  func(text string)
 	OnClose      func()
 }
 
@@ -367,6 +368,7 @@ func (w *ClientWindow) Run() error {
 	w.btnDisc = btnDisc
 	w.mu.Unlock()
 
+	addClipboardListener(hwnd)
 	w.applyStateToControls()
 	procShowWindow.Call(hwnd, swShowNormal)
 	procUpdateWindow.Call(hwnd)
@@ -684,6 +686,16 @@ func clientWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 
+	case wmClipboardUpdate:
+		if w.callbacks.OnClipboard != nil {
+			go func() {
+				if txt := ReadClipboardText(); txt != "" {
+					w.callbacks.OnClipboard(txt)
+				}
+			}()
+		}
+		return 0
+
 	case wmClose:
 		if w.callbacks.OnClose != nil {
 			go w.callbacks.OnClose()
@@ -692,6 +704,7 @@ func clientWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case wmDestroy:
+		removeClipboardListener(hwnd)
 		procPostQuitMessage.Call(0)
 		return 0
 	}

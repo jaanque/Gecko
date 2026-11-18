@@ -4,7 +4,6 @@ package win
 
 import (
 	"errors"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -12,23 +11,20 @@ import (
 )
 
 var (
-	user32Cap = syscall.NewLazyDLL("user32.dll")
-	gdi32Cap  = syscall.NewLazyDLL("gdi32.dll")
+	procGetSystemMetrics = user32GUI.NewProc("GetSystemMetrics")
+	procGetDC            = user32GUI.NewProc("GetDC")
+	procReleaseDC        = user32GUI.NewProc("ReleaseDC")
+	procGetCursorInfo    = user32GUI.NewProc("GetCursorInfo")
+	procGetIconInfo      = user32GUI.NewProc("GetIconInfo")
+	procDrawIconEx       = user32GUI.NewProc("DrawIconEx")
 
-	procGetSystemMetrics = user32Cap.NewProc("GetSystemMetrics")
-	procGetDC            = user32Cap.NewProc("GetDC")
-	procReleaseDC        = user32Cap.NewProc("ReleaseDC")
-	procGetCursorInfo    = user32Cap.NewProc("GetCursorInfo")
-	procGetIconInfo      = user32Cap.NewProc("GetIconInfo")
-	procDrawIconEx       = user32Cap.NewProc("DrawIconEx")
-
-	procCreateCompatibleDC     = gdi32Cap.NewProc("CreateCompatibleDC")
-	procCreateCompatibleBitmap = gdi32Cap.NewProc("CreateCompatibleBitmap")
-	procSelectObject           = gdi32Cap.NewProc("SelectObject")
-	procBitBlt                 = gdi32Cap.NewProc("BitBlt")
-	procGetDIBits              = gdi32Cap.NewProc("GetDIBits")
-	procDeleteObject           = gdi32Cap.NewProc("DeleteObject")
-	procDeleteDC               = gdi32Cap.NewProc("DeleteDC")
+	procCreateCompatibleDC     = gdi32GUI.NewProc("CreateCompatibleDC")
+	procCreateCompatibleBitmap = gdi32GUI.NewProc("CreateCompatibleBitmap")
+	procSelectObject           = gdi32GUI.NewProc("SelectObject")
+	procBitBlt                 = gdi32GUI.NewProc("BitBlt")
+	procGetDIBits              = gdi32GUI.NewProc("GetDIBits")
+	procDeleteObject           = gdi32GUI.NewProc("DeleteObject")
+	procDeleteDC               = gdi32GUI.NewProc("DeleteDC")
 )
 
 const (

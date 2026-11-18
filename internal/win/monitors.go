@@ -10,8 +10,8 @@ import (
 )
 
 var (
-	procEnumDisplayMonitors = user32Cap.NewProc("EnumDisplayMonitors")
-	procGetMonitorInfoCapW  = user32Cap.NewProc("GetMonitorInfoW")
+	procEnumDisplayMonitors = user32GUI.NewProc("EnumDisplayMonitors")
+	procGetMonitorInfoW     = user32GUI.NewProc("GetMonitorInfoW")
 )
 
 const monitorInfoPrimary = 0x00000001
@@ -35,7 +35,7 @@ var (
 func enumMonitorProc(hMon, _ uintptr, _ uintptr, _ uintptr) uintptr {
 	var mi monitorInfo
 	mi.CbSize = uint32(unsafe.Sizeof(mi))
-	if ok, _, _ := procGetMonitorInfoCapW.Call(hMon, uintptr(unsafe.Pointer(&mi))); ok != 0 {
+	if ok, _, _ := procGetMonitorInfoW.Call(hMon, uintptr(unsafe.Pointer(&mi))); ok != 0 {
 		w := int(mi.RcMonitor.Right - mi.RcMonitor.Left)
 		h := int(mi.RcMonitor.Bottom - mi.RcMonitor.Top)
 		if w > 0 && h > 0 {

@@ -12,11 +12,10 @@ import (
 )
 
 var (
-	user32Input = syscall.NewLazyDLL("user32.dll")
-	sasDLL      = syscall.NewLazyDLL("sas.dll")
+	sasDLL = syscall.NewLazyDLL("sas.dll")
 
-	procSendInput     = user32Input.NewProc("SendInput")
-	procMapVirtualKey = user32Input.NewProc("MapVirtualKeyW")
+	procSendInput     = user32GUI.NewProc("SendInput")
+	procMapVirtualKey = user32GUI.NewProc("MapVirtualKeyW")
 	procSendSAS       = sasDLL.NewProc("SendSAS")
 )
 
