@@ -29,6 +29,7 @@ var (
 	procGetWindowLongW     = user32GUI.NewProc("GetWindowLongW")
 	procSetWindowLongW     = user32GUI.NewProc("SetWindowLongW")
 	procGetForegroundWin   = user32GUI.NewProc("GetForegroundWindow")
+	procGetAsyncKeyState   = user32GUI.NewProc("GetAsyncKeyState")
 	procSetWindowsHookExW  = user32GUI.NewProc("SetWindowsHookExW")
 	procUnhookWindowsHook  = user32GUI.NewProc("UnhookWindowsHookEx")
 	procCallNextHookEx     = user32GUI.NewProc("CallNextHookEx")
@@ -37,29 +38,32 @@ var (
 const (
 	wsOverlappedWindow = 0x00CF0000
 
-	wmSize        = 0x0005
-	wmKillFocus   = 0x0008
-	wmEraseBkgnd  = 0x0014
+	wmSize         = 0x0005
+	wmKillFocus    = 0x0008
+	wmEraseBkgnd   = 0x0014
 	wmGetMinMaxInf = 0x0024
-	wmKeyDown     = 0x0100
-	wmKeyUp       = 0x0101
-	wmSysKeyDown  = 0x0104
-	wmSysKeyUp    = 0x0105
-	wmMouseMove   = 0x0200
-	wmLButtonDown = 0x0201
-	wmLButtonUp   = 0x0202
-	wmRButtonDown = 0x0204
-	wmRButtonUp   = 0x0205
-	wmMButtonDown = 0x0207
-	wmMButtonUp   = 0x0208
-	wmMouseWheel  = 0x020A
-	wmXButtonDown = 0x020B
-	wmXButtonUp   = 0x020C
-	wmMouseHWheel = 0x020E
-	wmSetCursor   = 0x0020
+	wmKeyDown      = 0x0100
+	wmKeyUp        = 0x0101
+	wmSysKeyDown   = 0x0104
+	wmSysKeyUp     = 0x0105
+	wmMouseMove    = 0x0200
+	wmLButtonDown  = 0x0201
+	wmLButtonUp    = 0x0202
+	wmRButtonDown  = 0x0204
+	wmRButtonUp    = 0x0205
+	wmMButtonDown  = 0x0207
+	wmMButtonUp    = 0x0208
+	wmMouseWheel   = 0x020A
+	wmXButtonDown  = 0x020B
+	wmXButtonUp    = 0x020C
+	wmMouseHWheel  = 0x020E
+	wmSetCursor    = 0x0020
 
-	wmViewerFrame = 0x8020
-	wmViewerClose = 0x8021
+	wmViewerFrame      = 0x8020
+	wmViewerClose      = 0x8021
+	wmViewerToggleFull = 0x8022
+	wmViewerToggleMenu = 0x8023
+	wmViewerDisconnect = 0x8024
 
 	colorOnColorMode   = 3
 	halftoneMode       = 4
@@ -77,6 +81,8 @@ const (
 	vkShift    = 0x10
 	vkControl  = 0x11
 	vkMenu     = 0x12
+	vkM        = 0x4D
+	vkQ        = 0x51
 	vkLControl = 0xA2
 	vkRControl = 0xA3
 	vkLMenu    = 0xA4
@@ -208,6 +214,7 @@ type remoteViewer struct {
 	toolbarBtns     []viewerToolbarBtn
 	toolbarDividers []int32
 	toolbarHidden   bool
+	pillBox         rect
 	hoverBtn        int
 	imgRect         rect
 	fullscreen      bool
@@ -611,14 +618,51 @@ func (v *remoteViewer) releaseBackbuffer() {
 
 func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	v.toolbarDividers = v.toolbarDividers[:0]
+	v.pillBox = rect{}
 
 	if v.toolbarHidden {
-		pillW := v.scale(152)
-		pillH := v.scale(24)
-		px := (width - pillW) / 2
-		v.toolbarBtns = []viewerToolbarBtn{
-			{id: vbtnShowBar, label: "▼ Mostrar menú", rc: rect{px, 0, px + pillW, pillH}},
+		pillH := v.scale(28)
+		padX := v.scale(4)
+		padY := v.scale(3)
+		gap := v.scale(4)
+		btnH := pillH - padY*2
+
+		showW := v.scale(88)
+		discW := v.scale(30)
+		fullW := v.scale(104)
+
+		totalW := padX*2 + showW + gap + discW
+		if v.fullscreen {
+			totalW += gap + fullW
 		}
+		px := (width - totalW) / 2
+		v.pillBox = rect{px, 0, px + totalW, pillH}
+
+		x := px + padX
+		btns := make([]viewerToolbarBtn, 0, 3)
+		btns = append(btns, viewerToolbarBtn{
+			id:    vbtnShowBar,
+			label: "▼ Menú",
+			rc:    rect{x, padY, x + showW, padY + btnH},
+		})
+		x += showW + gap
+
+		if v.fullscreen {
+			btns = append(btns, viewerToolbarBtn{
+				id:    vbtnFull,
+				label: "Salir pantalla",
+				rc:    rect{x, padY, x + fullW, padY + btnH},
+			})
+			x += fullW + gap
+		}
+
+		btns = append(btns, viewerToolbarBtn{
+			id:    vbtnDisc,
+			label: "×",
+			rc:    rect{x, padY, x + discW, padY + btnH},
+		})
+
+		v.toolbarBtns = btns
 		return 0
 	}
 
@@ -862,19 +906,33 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 		)
 	})
 
-	// 3. When toolbar is hidden, draw the compact top-center reveal tab on top of the viewport.
-	if v.toolbarHidden && len(v.toolbarBtns) == 1 {
-		b := v.toolbarBtns[0]
-		bg := rgb(24, 24, 27)
-		border := rgb(63, 63, 70)
-		if v.hoverBtn == vbtnShowBar {
-			bg = rgb(39, 39, 42)
-			border = rgb(113, 113, 122)
-		}
+	// 3. When toolbar is hidden, draw the compact top-center floating control capsule on top of the viewport.
+	if v.toolbarHidden && v.pillBox.Right > v.pillBox.Left {
+		// Slightly raise top edge so only the bottom corners are rounded like a crisp pull-tab.
+		capRC := rect{v.pillBox.Left, v.pillBox.Top - v.scale(6), v.pillBox.Right, v.pillBox.Bottom}
+		drawRoundedCard(memDC, capRC, v.scale(8), rgb(24, 24, 27), rgb(63, 63, 70))
+
 		procSelectObject.Call(memDC, v.fontBtn)
-		// Slightly raise top edge so only bottom corners look rounded like a clean pull-tab.
-		tabRC := rect{b.rc.Left, b.rc.Top - v.scale(4), b.rc.Right, b.rc.Bottom}
-		drawFlatButton(memDC, tabRC, v.scale(6), bg, border, rgb(244, 244, 245), b.label)
+		for _, b := range v.toolbarBtns {
+			hovered := v.hoverBtn == b.id
+			bg := rgb(24, 24, 27)
+			border := rgb(24, 24, 27)
+			fg := rgb(244, 244, 245)
+
+			switch {
+			case b.id == vbtnDisc:
+				fg = rgb(248, 113, 113)
+				if hovered {
+					bg = rgb(127, 29, 29)
+					border = rgb(153, 27, 27)
+					fg = rgb(255, 255, 255)
+				}
+			case hovered:
+				bg = rgb(63, 63, 70)
+				border = rgb(82, 82, 91)
+			}
+			drawFlatButton(memDC, b.rc, v.scale(5), bg, border, fg, b.label)
+		}
 	}
 
 	procSelectObject.Call(memDC, oldFont)
@@ -888,6 +946,14 @@ func (v *remoteViewer) hitTestToolbar(x, y int32) int {
 		}
 	}
 	return 0
+}
+
+func (v *remoteViewer) isInCollapsedPill(x, y int32) bool {
+	if !v.toolbarHidden {
+		return false
+	}
+	p := v.pillBox
+	return p.Right > p.Left && x >= p.Left && x <= p.Right && y >= p.Top && y <= p.Bottom
 }
 
 func (v *remoteViewer) mapMouseToNormalized(x, y int32) (uint16, uint16, bool) {
@@ -928,6 +994,7 @@ func (v *remoteViewer) toggleFullscreen(hwnd uintptr) {
 		var mi monitorInfo
 		mi.CbSize = uint32(unsafe.Sizeof(mi))
 		if ok, _, _ := procGetMonitorInfoW.Call(mon, uintptr(unsafe.Pointer(&mi))); ok != 0 {
+			v.fullscreen = true
 			setWindowStyle(hwnd, v.prevStyle&^wsOverlappedWindow)
 			m := mi.RcMonitor
 			procSetWindowPos.Call(
@@ -936,14 +1003,15 @@ func (v *remoteViewer) toggleFullscreen(hwnd uintptr) {
 				uintptr(m.Right-m.Left), uintptr(m.Bottom-m.Top),
 				swpNoOwnerZOrder|swpFrameChanged,
 			)
-			v.fullscreen = true
 		}
 	} else {
+		v.fullscreen = false
+		v.toolbarHidden = false
 		setWindowStyle(hwnd, v.prevStyle)
 		procSetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&v.prevPlace)))
 		procSetWindowPos.Call(hwnd, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoOwnerZOrder|swpFrameChanged)
-		v.fullscreen = false
 	}
+	v.hoverBtn = 0
 	procInvalidateRect.Call(hwnd, 0, 0)
 }
 
@@ -982,6 +1050,21 @@ func (v *remoteViewer) handleKeyMessage(down bool, wParam, lParam uintptr) {
 			v.mu.Unlock()
 			if hwnd != 0 {
 				v.toggleFullscreen(hwnd)
+			}
+		}
+		return
+	}
+	if (vk == vkM || vk == vkQ) && isAsyncKeyDown(vkControl) && isAsyncKeyDown(vkMenu) {
+		if down {
+			v.mu.Lock()
+			hwnd := v.hwnd
+			v.mu.Unlock()
+			if hwnd != 0 {
+				if vk == vkM {
+					procPostMessageW.Call(hwnd, wmViewerToggleMenu, 0, 0)
+				} else {
+					procPostMessageW.Call(hwnd, wmViewerDisconnect, 0, 0)
+				}
 			}
 		}
 		return
@@ -1081,6 +1164,11 @@ func (v *remoteViewer) selectMonitor(hwnd uintptr, monitorIndex int) {
 	procInvalidateRect.Call(hwnd, 0, 0)
 }
 
+func isAsyncKeyDown(vk uintptr) bool {
+	r, _, _ := procGetAsyncKeyState.Call(vk)
+	return (r & 0x8000) != 0
+}
+
 // viewerKeyboardLLProc captures system keys (Win, Alt+Tab, Ctrl+Esc, PrintScreen, etc.)
 // strictly while the remote viewer window is the active foreground window.
 func viewerKeyboardLLProc(nCode int32, wParam, lParam uintptr) uintptr {
@@ -1105,10 +1193,23 @@ func viewerKeyboardLLProc(nCode int32, wParam, lParam uintptr) uintptr {
 					down := wParam == wmKeyDown || wParam == wmSysKeyDown
 					up := wParam == wmKeyUp || wParam == wmSysKeyUp
 
-					// Keep F11 local for fullscreen toggle.
+					// Local viewer hotkeys (dispatched asynchronously via PostMessageW):
+					// - F11: toggle fullscreen
+					// - Ctrl+Alt+M: toggle menu bar
+					// - Ctrl+Alt+Q: disconnect session
 					if vk == vkF11 {
 						if down {
-							v.toggleFullscreen(hwnd)
+							procPostMessageW.Call(hwnd, wmViewerToggleFull, 0, 0)
+						}
+						return 1
+					}
+					if (vk == vkM || vk == vkQ) && isAsyncKeyDown(vkControl) && isAsyncKeyDown(vkMenu) {
+						if down {
+							if vk == vkM {
+								procPostMessageW.Call(hwnd, wmViewerToggleMenu, 0, 0)
+							} else {
+								procPostMessageW.Call(hwnd, wmViewerDisconnect, 0, 0)
+							}
 						}
 						return 1
 					}
@@ -1154,6 +1255,26 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		procInvalidateRect.Call(hwnd, 0, 0)
 		return 0
 
+	case wmViewerToggleFull:
+		v.releaseAllHeldKeys()
+		v.toggleFullscreen(hwnd)
+		return 0
+
+	case wmViewerToggleMenu:
+		v.releaseAllHeldKeys()
+		v.toolbarHidden = !v.toolbarHidden
+		v.hoverBtn = 0
+		procInvalidateRect.Call(hwnd, 0, 0)
+		return 0
+
+	case wmViewerDisconnect:
+		v.releaseAllHeldKeys()
+		if v.cb.OnDisconnect != nil {
+			go v.cb.OnDisconnect()
+		}
+		v.CloseUI()
+		return 0
+
 	case wmPaint:
 		v.paint(hwnd)
 		return 0
@@ -1170,12 +1291,22 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case wmMouseMove:
 		x, y := unpackXY(lParam)
+		// In fullscreen with menu collapsed, touching the very top-center edge reveals the menu automatically.
+		if v.fullscreen && v.toolbarHidden && v.mouseBtns == 0 && y <= 1 && v.pillBox.Right > v.pillBox.Left {
+			if x >= v.pillBox.Left-v.scale(40) && x <= v.pillBox.Right+v.scale(40) {
+				v.toolbarHidden = false
+				v.hoverBtn = 0
+				procInvalidateRect.Call(hwnd, 0, 0)
+				return 0
+			}
+		}
+
 		hb := v.hitTestToolbar(x, y)
 		if hb != v.hoverBtn {
 			v.hoverBtn = hb
 			procInvalidateRect.Call(hwnd, 0, 0)
 		}
-		if hb == 0 {
+		if hb == 0 && !v.isInCollapsedPill(x, y) {
 			now := time.Now()
 			if now.Sub(v.lastMoveAt) >= 8*time.Millisecond {
 				if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
@@ -1195,6 +1326,9 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		procSetFocus.Call(hwnd)
 		if hb := v.hitTestToolbar(x, y); hb != 0 {
 			v.handleToolbarClick(hwnd, hb)
+			return 0
+		}
+		if v.isInCollapsedPill(x, y) {
 			return 0
 		}
 		if nx, ny, ok := v.mapMouseToNormalized(x, y); ok {
