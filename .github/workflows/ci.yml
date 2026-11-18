@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-build:
+    name: Vet, Test (Linux) & Cross-Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Files not formatted with gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet (Linux)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go vet ./cmd/client ./cmd/relay ./internal/admin ./internal/config ./internal/linux ./internal/protocol ./internal/relay ./internal/security ./internal/video
+
+      - name: Vet (Windows)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+        run: go vet ./...
+
+      - name: Test (Linux)
+        run: go test -race -count=1 ./internal/admin ./internal/config ./internal/linux ./internal/protocol ./internal/relay ./internal/security ./internal/video
+
+      - name: Cross-build all binaries
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: amd64
+        run: |
+          mkdir -p cmd/admin/assets dist
+          GOOS=windows go build -trimpath -ldflags="-H=windowsgui -s -w" -o cmd/admin/assets/client_template.exe ./cmd/client
+          GOOS=linux   go build -trimpath -ldflags="-s -w"              -o cmd/admin/assets/client_template_linux ./cmd/client
+          GOOS=windows go build -trimpath -ldflags="-H=windowsgui -s -w" -o dist/AdminRemoto.exe ./cmd/admin
+          GOOS=windows go build -trimpath -ldflags="-s -w"              -o dist/RelayServidor.exe ./cmd/relay
+          GOOS=linux   go build -trimpath -ldflags="-s -w"              -o dist/RelayServidor ./cmd/relay
+          ls -lh dist/
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: amd64
+        run: go test -count=1 ./...
+
+  docker:
+    name: Build Relay Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t remote-relay:ci .

@@ -140,15 +140,15 @@ type queuedInput struct {
 }
 
 const (
-	vbtnQualLow   = 1
-	vbtnQualMed   = 2
-	vbtnQualHi    = 3
-	vbtnFull      = 4
-	vbtnDisc      = 5
-	vbtnHideBar   = 6
-	vbtnShowBar   = 7
-	vbtnMonAll    = 100
-	vbtnMonBase   = 200 // 200 + monitorIndex (0, 1, 2, ...)
+	vbtnQualLow = 1
+	vbtnQualMed = 2
+	vbtnQualHi  = 3
+	vbtnFull    = 4
+	vbtnDisc    = 5
+	vbtnHideBar = 6
+	vbtnShowBar = 7
+	vbtnMonAll  = 100
+	vbtnMonBase = 200 // 200 + monitorIndex (0, 1, 2, ...)
 )
 
 // ViewerCallbacks wires the native remote desktop viewer back to the Hub.
@@ -214,11 +214,11 @@ type remoteViewer struct {
 	hoverBtn        int
 	imgRect         rect
 	fullscreen      bool
-	prevStyle   uintptr
-	prevPlace   windowPlacement
-	lastMoveAt  time.Time
-	heldKeys    map[uint16]uint8
-	mouseBtns   int
+	prevStyle       uintptr
+	prevPlace       windowPlacement
+	lastMoveAt      time.Time
+	heldKeys        map[uint16]uint8
+	mouseBtns       int
 }
 
 var (

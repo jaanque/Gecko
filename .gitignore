@@ -1,6 +1,7 @@
 # Binarios compilados
 dist/
 cmd/admin/assets/client_template.exe
+cmd/admin/assets/client_template_linux
 *.exe
 
 # Claves privadas, certificados y tokens locales

@@ -144,8 +144,8 @@ type SessionStopPayload struct {
 
 // StreamConfigPayload adjusts quality, target monitor, or requests a full keyframe.
 type StreamConfigPayload struct {
-	Quality  int  `json:"quality,omitempty"`  // 35..95
-	Monitor  *int `json:"monitor,omitempty"`  // 0..N-1 for specific monitor, -1 for all
+	Quality  int  `json:"quality,omitempty"` // 35..95
+	Monitor  *int `json:"monitor,omitempty"` // 0..N-1 for specific monitor, -1 for all
 	Keyframe bool `json:"keyframe,omitempty"`
 }
 
