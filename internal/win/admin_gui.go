@@ -29,9 +29,9 @@ const (
 	wsExClientEdge = 0x00000200
 	esAutoHScroll  = 0x0080
 
-	wmSetFont = 0x0030
-	enChange       = 0x0300
-	emSetCueBaner  = 0x1501
+	wmSetFont     = 0x0030
+	enChange      = 0x0300
+	emSetCueBaner = 0x1501
 
 	wmAdminRefresh     = 0x8002
 	wmAdminOpenViewer  = 0x8003
