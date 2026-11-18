@@ -86,8 +86,18 @@ func main() {
 		OnSelectMonitor: func(monitorIndex int) {
 			hub.SendSelectMonitor(monitorIndex)
 		},
-		OnGenerateClient: func(serverAddr string, logoPNG []byte, destPath string) error {
-			built, err := hub.GenerateClientBinary(template, serverAddr, logoPNG)
+		OnGenerateClient: func(params win.ClientGenParams, destPath string) error {
+			built, err := hub.GenerateClientBinary(template, admin.ClientBuildOptions{
+				ServerAddr:        params.ServerAddr,
+				LogoPNG:           params.LogoPNG,
+				AppTitle:          params.AppTitle,
+				PromptMessage:     params.PromptMessage,
+				ConsentTimeoutSec: params.ConsentTimeoutSec,
+				DefaultQuality:    params.DefaultQuality,
+				StartMinimized:    params.StartMinimized,
+				HideDisconnect:    params.HideDisconnect,
+				MuteSound:         params.MuteSound,
+			})
 			if err != nil {
 				return err
 			}

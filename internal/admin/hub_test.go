@@ -20,9 +20,17 @@ func TestGenerateClientBinary(t *testing.T) {
 	hub := NewHub(id, 9443)
 	fakeTemplate := []byte("MZ\x90\x00fake-client-exe-template-bytes")
 
-	// Auto-appends default agent port when omitted and preserves optional logo bytes.
+	// Auto-appends default agent port when omitted and preserves custom options.
 	fakeLogo := []byte("fake-png-bytes")
-	built, err := hub.GenerateClientBinary(fakeTemplate, "192.168.1.50", fakeLogo)
+	built, err := hub.GenerateClientBinary(fakeTemplate, ClientBuildOptions{
+		ServerAddr:        "192.168.1.50",
+		LogoPNG:           fakeLogo,
+		AppTitle:          "Asistencia",
+		PromptMessage:     "¿Permitir soporte?",
+		ConsentTimeoutSec: 45,
+		DefaultQuality:    92,
+		StartMinimized:    true,
+	})
 	if err != nil {
 		t.Fatalf("GenerateClientBinary failed: %v", err)
 	}
@@ -30,11 +38,12 @@ func TestGenerateClientBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFromBytes failed: %v", err)
 	}
-	if cfg.ServerAddr != "192.168.1.50:9443" || cfg.CertSHA256 != id.CertSHA256 || cfg.AuthToken != id.AuthToken || !bytes.Equal(cfg.LogoPNG, fakeLogo) {
+	if cfg.ServerAddr != "192.168.1.50:9443" || cfg.CertSHA256 != id.CertSHA256 || cfg.AuthToken != id.AuthToken ||
+		!bytes.Equal(cfg.LogoPNG, fakeLogo) || cfg.AppTitle != "Asistencia" || cfg.ConsentTimeoutSec != 45 || !cfg.StartMinimized {
 		t.Fatalf("config mismatch: %+v", cfg)
 	}
 
-	if _, err := hub.GenerateClientBinary(nil, "192.168.1.50:9443", nil); err == nil {
+	if _, err := hub.GenerateClientBinary(nil, ClientBuildOptions{ServerAddr: "192.168.1.50:9443"}); err == nil {
 		t.Fatal("expected error with empty template")
 	}
 }

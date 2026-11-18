@@ -75,9 +75,21 @@ func main() {
 		injector:  win.NewInputInjector(),
 		ackWakeCh: make(chan struct{}, 1),
 	}
-	agent.quality.Store(78)
+	initQual := cfg.DefaultQuality
+	if initQual < 35 || initQual > 95 {
+		initQual = 78
+	}
+	agent.quality.Store(int32(initQual))
 
-	window := win.NewClientWindow(hostname, cfg.LogoPNG, win.ClientCallbacks{
+	window := win.NewClientWindow(win.ClientWindowOptions{
+		Hostname:       hostname,
+		LogoPNG:        cfg.LogoPNG,
+		AppTitle:       cfg.AppTitle,
+		PromptMessage:  cfg.PromptMessage,
+		StartMinimized: cfg.StartMinimized,
+		HideDisconnect: cfg.HideDisconnect,
+		MuteSound:      cfg.MuteSound,
+	}, win.ClientCallbacks{
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
@@ -333,8 +345,12 @@ func (a *clientAgent) handleConsentRequest(req protocol.ConsentReqPayload) {
 		return
 	}
 
-	timeout := time.Duration(req.TimeoutSec) * time.Second
-	if timeout <= 0 || timeout > 120*time.Second {
+	timeoutSec := a.cfg.ConsentTimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = req.TimeoutSec
+	}
+	timeout := time.Duration(timeoutSec) * time.Second
+	if timeout < 10*time.Second || timeout > 300*time.Second {
 		timeout = 60 * time.Second
 	}
 

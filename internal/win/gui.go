@@ -61,10 +61,11 @@ const (
 	wsVisible     = 0x10000000
 	bsOwnerDraw   = 0x0000000B
 
-	swHide           = 0
-	swShowNormal     = 1
-	swShowNoActivate = 4
-	swRestore        = 9
+	swHide            = 0
+	swShowNormal      = 1
+	swShowNoActivate  = 4
+	swShowMinNoActive = 7
+	swRestore         = 9
 
 	wmDestroy  = 0x0002
 	wmPaint    = 0x000F
@@ -183,11 +184,27 @@ type flashWInfo struct {
 	DwTimeout uint32
 }
 
+// ClientWindowOptions customizes the native client window appearance and behavior.
+type ClientWindowOptions struct {
+	Hostname       string
+	LogoPNG        []byte
+	AppTitle       string
+	PromptMessage  string
+	StartMinimized bool
+	HideDisconnect bool
+	MuteSound      bool
+}
+
 // ClientWindow manages the native Win32 client dialog.
 type ClientWindow struct {
-	hostname  string
-	logoPNG   []byte
-	callbacks ClientCallbacks
+	hostname       string
+	logoPNG        []byte
+	appTitle       string
+	promptMessage  string
+	startMinimized bool
+	hideDisconnect bool
+	muteSound      bool
+	callbacks      ClientCallbacks
 
 	mu        sync.Mutex
 	state     ClientUIState
@@ -214,15 +231,28 @@ var (
 )
 
 // NewClientWindow constructs a ClientWindow instance. Call Run() to start the Win32 message loop.
-func NewClientWindow(hostname string, logoPNG []byte, cb ClientCallbacks) *ClientWindow {
+func NewClientWindow(opts ClientWindowOptions, cb ClientCallbacks) *ClientWindow {
+	title := opts.AppTitle
+	if title == "" {
+		title = "Cliente Remoto"
+	}
+	prompt := opts.PromptMessage
+	if prompt == "" {
+		prompt = "El administrador solicita controlar este equipo."
+	}
 	return &ClientWindow{
-		hostname:  hostname,
-		logoPNG:   logoPNG,
-		callbacks: cb,
-		state:     UIStateConnecting,
-		detail:    "Conectando con el administrador...",
-		dpi:       96,
-		readyCh:   make(chan struct{}),
+		hostname:       opts.Hostname,
+		logoPNG:        opts.LogoPNG,
+		appTitle:       title,
+		promptMessage:  prompt,
+		startMinimized: opts.StartMinimized,
+		hideDisconnect: opts.HideDisconnect,
+		muteSound:      opts.MuteSound,
+		callbacks:      cb,
+		state:          UIStateConnecting,
+		detail:         "Conectando con el administrador...",
+		dpi:            96,
+		readyCh:        make(chan struct{}),
 	}
 }
 
@@ -277,7 +307,7 @@ func (w *ClientWindow) Run() error {
 	defer procDeleteObject.Call(w.bgBrush)
 
 	className, _ := syscall.UTF16PtrFromString("RemoteClientWindowClass")
-	title, _ := syscall.UTF16PtrFromString("Cliente Remoto")
+	title, _ := syscall.UTF16PtrFromString(w.appTitle)
 
 	wc := wndClassExW{
 		CbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
@@ -375,7 +405,11 @@ func (w *ClientWindow) Run() error {
 	w.mu.Unlock()
 
 	w.applyStateToControls()
-	procShowWindow.Call(hwnd, swShowNormal)
+	if w.startMinimized {
+		procShowWindow.Call(hwnd, swShowMinNoActive)
+	} else {
+		procShowWindow.Call(hwnd, swShowNormal)
+	}
 	procUpdateWindow.Call(hwnd)
 	w.readyOnce.Do(func() { close(w.readyCh) })
 
@@ -436,18 +470,20 @@ func (w *ClientWindow) applyStateToControls() {
 			procShowWindow.Call(hwnd, swShowNoActivate)
 		}
 		procSetWindowPos.Call(hwnd, hwndTopMost, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate|swpShowWindow)
-		procMessageBeep.Call(mbIconAsterisk)
+		if !w.muteSound {
+			procMessageBeep.Call(mbIconAsterisk)
+		}
 		fi := flashWInfo{
-			CbSize: uint32(unsafe.Sizeof(flashWInfo{})),
-			Hwnd:   hwnd,
+			CbSize:  uint32(unsafe.Sizeof(flashWInfo{})),
+			Hwnd:    hwnd,
 			DwFlags: flashwAll | flashwTimerNoFG,
-			UCount: 3,
+			UCount:  3,
 		}
 		procFlashWindowEx.Call(uintptr(unsafe.Pointer(&fi)))
 	} else {
 		procShowWindow.Call(btnAllow, swHide)
 		procShowWindow.Call(btnDeny, swHide)
-		if st == UIStateActive {
+		if st == UIStateActive && !w.hideDisconnect {
 			procShowWindow.Call(btnDisc, swShowNormal)
 		} else {
 			procShowWindow.Call(btnDisc, swHide)
@@ -513,7 +549,7 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 	case UIStatePrompt:
 		procSetTextColor.Call(hdc, rgb(24, 24, 27))
 		rcMsg := rect{pad, w.scale(108), cr.Right - pad, w.scale(136)}
-		drawText(hdc, "El administrador solicita controlar este equipo.", &rcMsg, dtLeft|dtSingleLn|dtVCenter)
+		drawText(hdc, w.promptMessage, &rcMsg, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 	case UIStateActive:
 		drawStatusDot(hdc, pad, w.scale(158), w.scale(10), rgb(22, 163, 74))

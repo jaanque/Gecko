@@ -19,12 +19,19 @@ const (
 
 var ErrNoEmbeddedConfig = errors.New("no embedded client config found")
 
-// ClientConfig holds the connection, security, and optional branding parameters embedded into ClienteRemoto.exe.
+// ClientConfig holds the connection, security, and customization options embedded into ClienteRemoto.exe.
 type ClientConfig struct {
-	ServerAddr string `json:"server_addr"`
-	CertSHA256 string `json:"cert_sha256"`
-	AuthToken  string `json:"auth_token"`
-	LogoPNG    []byte `json:"logo_png,omitempty"`
+	ServerAddr        string `json:"server_addr"`
+	CertSHA256        string `json:"cert_sha256"`
+	AuthToken         string `json:"auth_token"`
+	LogoPNG           []byte `json:"logo_png,omitempty"`
+	AppTitle          string `json:"app_title,omitempty"`
+	PromptMessage     string `json:"prompt_message,omitempty"`
+	ConsentTimeoutSec int    `json:"consent_timeout_sec,omitempty"`
+	DefaultQuality    int    `json:"default_quality,omitempty"`
+	StartMinimized    bool   `json:"start_minimized,omitempty"`
+	HideDisconnect    bool   `json:"hide_disconnect,omitempty"`
+	MuteSound         bool   `json:"mute_sound,omitempty"`
 }
 
 // Validate checks that all required fields are present.

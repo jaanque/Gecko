@@ -126,13 +126,26 @@ func (h *Hub) CertFingerprintShort() string {
 	return strings.Join(parts, ":") + "…"
 }
 
+// ClientBuildOptions contains all admin-configurable settings embedded into ClienteRemoto.exe.
+type ClientBuildOptions struct {
+	ServerAddr        string
+	LogoPNG           []byte
+	AppTitle          string
+	PromptMessage     string
+	ConsentTimeoutSec int
+	DefaultQuality    int
+	StartMinimized    bool
+	HideDisconnect    bool
+	MuteSound         bool
+}
+
 // GenerateClientBinary creates a ready-to-run ClienteRemoto.exe embedding the server address,
-// TLS certificate SHA-256 pin, shared auth token, and optional PNG logo.
-func (h *Hub) GenerateClientBinary(template []byte, serverAddr string, logoPNG []byte) ([]byte, error) {
+// TLS certificate SHA-256 pin, shared auth token, and custom client options.
+func (h *Hub) GenerateClientBinary(template []byte, opts ClientBuildOptions) ([]byte, error) {
 	if len(template) == 0 {
 		return nil, errors.New("plantilla de cliente no disponible; compila el proyecto con build.bat")
 	}
-	addr := strings.TrimSpace(serverAddr)
+	addr := strings.TrimSpace(opts.ServerAddr)
 	if addr == "" {
 		return nil, errors.New("la dirección del servidor es obligatoria")
 	}
@@ -143,11 +156,31 @@ func (h *Hub) GenerateClientBinary(template []byte, serverAddr string, logoPNG [
 			return nil, fmt.Errorf("formato inválido (usa IP:PUERTO, ej. 192.168.1.50:%d)", h.agentPort)
 		}
 	}
+
+	timeout := opts.ConsentTimeoutSec
+	if timeout < 10 {
+		timeout = 60
+	} else if timeout > 300 {
+		timeout = 300
+	}
+
+	quality := opts.DefaultQuality
+	if quality != 55 && quality != 78 && quality != 92 {
+		quality = 78
+	}
+
 	return config.AppendToBinary(template, config.ClientConfig{
-		ServerAddr: addr,
-		CertSHA256: h.identity.CertSHA256,
-		AuthToken:  h.identity.AuthToken,
-		LogoPNG:    logoPNG,
+		ServerAddr:        addr,
+		CertSHA256:        h.identity.CertSHA256,
+		AuthToken:         h.identity.AuthToken,
+		LogoPNG:           opts.LogoPNG,
+		AppTitle:          strings.TrimSpace(opts.AppTitle),
+		PromptMessage:     strings.TrimSpace(opts.PromptMessage),
+		ConsentTimeoutSec: timeout,
+		DefaultQuality:    quality,
+		StartMinimized:    opts.StartMinimized,
+		HideDisconnect:    opts.HideDisconnect,
+		MuteSound:         opts.MuteSound,
 	})
 }
 

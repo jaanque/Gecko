@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	MaxPayloadSize = 16 * 1024 * 1024 // 16 MiB hard cap per frame
-	HeaderSize     = 5
+	MaxPayloadSize  = 16 * 1024 * 1024 // 16 MiB hard cap per message
+	HeaderSize      = 5
+	FrameHeaderSize = 10 // frameID(4) + width(2) + height(2) + tileCount(2)
+	TileHeaderSize  = 13 // x(2) + y(2) + w(2) + h(2) + codec(1) + dataLen(4)
 )
 
 // Message types.
@@ -29,19 +31,11 @@ const (
 	MsgKey          uint8 = 0x31
 )
 
-// Tile codecs used inside MsgFrame payloads.
+// Tile codecs inside MsgFrame payloads.
 const (
 	TileCodecJPEG    uint8 = 0
 	TileCodecZlibBGR uint8 = 1
 )
-
-// FrameHeaderSize is the binary header size of MsgFrame:
-// frameID(4) + sentUnixNano(8) + width(2) + height(2) + tileCount(2).
-const FrameHeaderSize = 18
-
-// TileHeaderSize is the binary header size per tile inside MsgFrame:
-// x(2) + y(2) + w(2) + h(2) + codec(1) + dataLen(4).
-const TileHeaderSize = 13
 
 // Mouse actions.
 const (
@@ -61,15 +55,10 @@ const (
 	ButtonX2     uint8 = 4
 )
 
-// Key actions.
+// Key actions & flags.
 const (
-	KeyDown    uint8 = 0
-	KeyUp      uint8 = 1
-	KeyUnicode uint8 = 2
-)
-
-// Key flags.
-const (
+	KeyDown         uint8 = 0
+	KeyUp           uint8 = 1
 	KeyFlagExtended uint8 = 1 << 0
 )
 
@@ -85,7 +74,6 @@ type MonitorInfo struct {
 type AuthPayload struct {
 	Token    string        `json:"token"`
 	Hostname string        `json:"hostname"`
-	OS       string        `json:"os"`
 	Width    int           `json:"width"`
 	Height   int           `json:"height"`
 	Monitors []MonitorInfo `json:"monitors,omitempty"`
@@ -119,8 +107,8 @@ type SessionStopPayload struct {
 
 // StreamConfigPayload adjusts quality, target monitor, or requests a full keyframe.
 type StreamConfigPayload struct {
-	Quality  int  `json:"quality,omitempty"`  // 30..95
-	Monitor  *int `json:"monitor,omitempty"`  // 0..N-1 for specific monitor, -1 for all monitors
+	Quality  int  `json:"quality,omitempty"`  // 35..95
+	Monitor  *int `json:"monitor,omitempty"`  // 0..N-1 for specific monitor, -1 for all
 	Keyframe bool `json:"keyframe,omitempty"`
 }
 
@@ -137,44 +125,34 @@ type MouseEvent struct {
 type KeyEvent struct {
 	Action uint8
 	VK     uint16
-	Scan   uint16 // hardware scan code or UTF-16 code unit for KeyUnicode
+	Scan   uint16
 	Flags  uint8
 }
 
-// FrameAck acknowledges a rendered frame for sliding-window backpressure and RTT measurement.
-type FrameAck struct {
-	FrameID      uint32
-	SentUnixNano int64
+// EncodeFrameAck serializes a frame ID into 4 bytes.
+func EncodeFrameAck(frameID uint32) []byte {
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], frameID)
+	return buf[:]
 }
 
-// EncodeFrameAck serializes a FrameAck into 12 bytes.
-func EncodeFrameAck(ack FrameAck) []byte {
-	buf := make([]byte, 12)
-	binary.BigEndian.PutUint32(buf[0:4], ack.FrameID)
-	binary.BigEndian.PutUint64(buf[4:12], uint64(ack.SentUnixNano))
-	return buf
-}
-
-// DecodeFrameAck parses a 12-byte FrameAck payload.
-func DecodeFrameAck(b []byte) (FrameAck, error) {
-	if len(b) != 12 {
-		return FrameAck{}, fmt.Errorf("invalid frame ack size: %d", len(b))
+// DecodeFrameAck parses a 4-byte frame acknowledgment.
+func DecodeFrameAck(b []byte) (uint32, error) {
+	if len(b) != 4 {
+		return 0, fmt.Errorf("invalid frame ack size: %d", len(b))
 	}
-	return FrameAck{
-		FrameID:      binary.BigEndian.Uint32(b[0:4]),
-		SentUnixNano: int64(binary.BigEndian.Uint64(b[4:12])),
-	}, nil
+	return binary.BigEndian.Uint32(b), nil
 }
 
 // EncodeMouse serializes a MouseEvent to 8 bytes.
 func EncodeMouse(ev MouseEvent) []byte {
-	buf := make([]byte, 8)
+	var buf [8]byte
 	buf[0] = ev.Action
 	buf[1] = ev.Button
 	binary.BigEndian.PutUint16(buf[2:4], ev.X)
 	binary.BigEndian.PutUint16(buf[4:6], ev.Y)
 	binary.BigEndian.PutUint16(buf[6:8], uint16(ev.Delta))
-	return buf
+	return buf[:]
 }
 
 // DecodeMouse parses an 8-byte MouseEvent.
@@ -193,12 +171,12 @@ func DecodeMouse(b []byte) (MouseEvent, error) {
 
 // EncodeKey serializes a KeyEvent to 6 bytes.
 func EncodeKey(ev KeyEvent) []byte {
-	buf := make([]byte, 6)
+	var buf [6]byte
 	buf[0] = ev.Action
 	binary.BigEndian.PutUint16(buf[1:3], ev.VK)
 	binary.BigEndian.PutUint16(buf[3:5], ev.Scan)
 	buf[5] = ev.Flags
-	return buf
+	return buf[:]
 }
 
 // DecodeKey parses a 6-byte KeyEvent.
