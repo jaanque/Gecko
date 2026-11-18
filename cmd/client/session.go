@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"remote-control/internal/protocol"
