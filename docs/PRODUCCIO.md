@@ -8,9 +8,9 @@ Aquest document recull els detalls d'arquitectura, compilació, desplegament en 
 
 | Binari | Plataforma | Funció |
 | :--- | :--- | :--- |
-| `RelayServidor` / `RelayServidor.exe` | Linux (amd64/arm64), Docker (`scratch`), Windows Server | Servidor pont mTLS 1.3, gestió de PKI/revocació, auditoria i enrutament de sessions. |
-| `AdminRemoto.exe` | Windows (amd64/arm64) | Consola d'administració nativa Win32 (o consola web local amb `-web`), visor remot i generador de clients. |
-| `AdminRemoto-linux` / `AdminRemoto-macos` | Linux · macOS | Consola d'administració web local (enllaçada a `127.0.0.1` amb token de sessió) i visor HTML5 Canvas. |
+| `dist/linux/RelayServidor` · `dist/windows/RelayServidor.exe` · `dist/macos/RelayServidor` | Linux, Windows, macOS, Docker (`scratch`) | Servidor pont mTLS 1.3, gestió de PKI/revocació, auditoria i enrutament de sessions. |
+| `dist/windows/AdminRemoto.exe` | Windows (amd64/arm64) | Consola d'administració nativa Win32 (o consola web local amb `-web`), visor remot i generador de clients. |
+| `dist/linux/AdminRemoto` · `dist/macos/AdminRemoto` | Linux · macOS | Consola d'administració web local (enllaçada a `127.0.0.1` amb token de sessió) i visor HTML5 Canvas. |
 | `ClientRemot.exe` | Windows (amd64/arm64) | Agent portable amb captura GPU **DXGI Desktop Duplication** (+ *fallback* GDI), multiidioma (`ca`/`es`/`en`). |
 | `ClientRemot` | Linux X11 / Wayland | Agent portable amb protocol X11 natiu i suport Wayland (`grim`/`spectacle`/`gnome-screenshot`, `ydotool`, `wl-copy`). |
 | `ClientRemot-macos` | macOS (arm64/amd64) | Agent portable amb `screencapture`, CoreGraphics (`CGEvent`), `pbcopy`/`pbpaste` i diàleg natiu. |
@@ -22,14 +22,14 @@ Aquest document recull els detalls d'arquitectura, compilació, desplegament en 
 Requereix **Go 1.22+** (sense `cgo`; funciona des de Windows, Linux o macOS):
 
 ```sh
-# Compilar tots els binaris (Windows/Linux amd64 + macOS arm64) a dist/
+# Compilar tots els binaris separats per SO a dist/{windows,linux,macos}/
 go run ./cmd/build
 
 # Compilar amb versió personalitzada o arquitectura ARM64
 go run ./cmd/build -version 1.0.0 -arch arm64 -macos-arch arm64
 
 # Comprovar la versió incrustada de qualsevol binari
-./dist/RelayServidor -version
+./dist/linux/RelayServidor -version
 
 # Executar tota la bateria de tests amb detector de condicions de cursa
 go test -race -count=1 ./...
@@ -94,7 +94,7 @@ docker exec gecko-relay /RelayServidor -show-key
 1. Instal·la el binari i crea un usuari dedicat sense privilegis:
    ```sh
    sudo useradd --system --home /var/lib/gecko-relay --shell /usr/sbin/nologin gecko
-   sudo install -m 0755 dist/RelayServidor /usr/local/bin/gecko-relay
+   sudo install -m 0755 dist/linux/RelayServidor /usr/local/bin/gecko-relay
    sudo install -d -o gecko -g gecko -m 0700 /var/lib/gecko-relay
    ```
 

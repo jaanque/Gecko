@@ -7,3 +7,4 @@ cmd/admin/assets/client_template_darwin
 
 # Claves privadas, certificados y tokens locales
 data/
+.DS_Store

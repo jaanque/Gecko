@@ -71,7 +71,7 @@ jobs:
       - name: Cross-build all binaries
         run: |
           go run ./cmd/build
-          ls -lh dist/
+          ls -lh dist/windows/ dist/linux/ dist/macos/
 
   test-windows:
     name: Test (Windows)

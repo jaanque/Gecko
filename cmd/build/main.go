@@ -45,7 +45,13 @@ func main() {
 	}
 	verLD += fmt.Sprintf(" -X remote-control/internal/version.Date=%s", time.Now().UTC().Format("2006-01-02"))
 
-	for _, dir := range []string{filepath.Join("cmd", "admin", "assets"), "dist"} {
+	dirs := []string{
+		filepath.Join("cmd", "admin", "assets"),
+		filepath.Join("dist", "windows"),
+		filepath.Join("dist", "linux"),
+		filepath.Join("dist", "macos"),
+	}
+	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "Error creando directorio %s: %v\n", dir, err)
 			os.Exit(1)
@@ -82,23 +88,7 @@ func main() {
 			goos:    "windows",
 			goarch:  goarch,
 			ldflags: "-H=windowsgui -s -w" + verLD,
-			output:  filepath.Join("dist", "AdminRemoto.exe"),
-			pkg:     "./cmd/admin",
-		},
-		{
-			label:   "Admin (Linux)",
-			goos:    "linux",
-			goarch:  goarch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "AdminRemoto-linux"),
-			pkg:     "./cmd/admin",
-		},
-		{
-			label:   "Admin (macOS)",
-			goos:    "darwin",
-			goarch:  darwinArch,
-			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "AdminRemoto-macos"),
+			output:  filepath.Join("dist", "windows", "AdminRemoto.exe"),
 			pkg:     "./cmd/admin",
 		},
 		{
@@ -106,15 +96,39 @@ func main() {
 			goos:    "windows",
 			goarch:  goarch,
 			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "RelayServidor.exe"),
+			output:  filepath.Join("dist", "windows", "RelayServidor.exe"),
 			pkg:     "./cmd/relay",
+		},
+		{
+			label:   "Admin (Linux)",
+			goos:    "linux",
+			goarch:  goarch,
+			ldflags: "-s -w" + verLD,
+			output:  filepath.Join("dist", "linux", "AdminRemoto"),
+			pkg:     "./cmd/admin",
 		},
 		{
 			label:   "Relay (Linux)",
 			goos:    "linux",
 			goarch:  goarch,
 			ldflags: "-s -w" + verLD,
-			output:  filepath.Join("dist", "RelayServidor"),
+			output:  filepath.Join("dist", "linux", "RelayServidor"),
+			pkg:     "./cmd/relay",
+		},
+		{
+			label:   "Admin (macOS)",
+			goos:    "darwin",
+			goarch:  darwinArch,
+			ldflags: "-s -w" + verLD,
+			output:  filepath.Join("dist", "macos", "AdminRemoto"),
+			pkg:     "./cmd/admin",
+		},
+		{
+			label:   "Relay (macOS)",
+			goos:    "darwin",
+			goarch:  darwinArch,
+			ldflags: "-s -w" + verLD,
+			output:  filepath.Join("dist", "macos", "RelayServidor"),
 			pkg:     "./cmd/relay",
 		},
 	}
@@ -137,7 +151,7 @@ func main() {
 		}
 	}
 
-	fmt.Println("Compilación completada en dist/")
+	fmt.Println("Compilación completada en dist/{windows,linux,macos}/")
 }
 
 func gitShortCommit() string {

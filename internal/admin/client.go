@@ -427,6 +427,7 @@ func (c *RelayClient) SendFile(filePath string) error {
 
 	buf := make([]byte, protocol.FileChunkSize)
 	var offset uint64
+	lastPct := -1
 	for {
 		n, rerr := f.Read(buf)
 		if n > 0 {
@@ -443,6 +444,13 @@ func (c *RelayClient) SendFile(filePath string) error {
 				return err
 			}
 			offset += uint64(n)
+			if info.Size() > 0 {
+				pct := int((int64(offset) * 100) / info.Size())
+				if pct >= lastPct+10 || pct == 100 {
+					lastPct = pct
+					c.emitFileStatus(safeName, true, fmt.Sprintf("Enviando %s (%d%%)...", safeName, pct))
+				}
+			}
 		}
 		if rerr == io.EOF {
 			break

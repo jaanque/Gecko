@@ -89,36 +89,6 @@ func ShowSaveExeDialog(ownerHwnd uintptr, defaultFileName string) (string, bool)
 	return syscall.UTF16ToString(fileBuf), true
 }
 
-// ShowSaveLinuxDialog opens the native Windows "Guardar como..." dialog for the Linux client binary.
-// Returns ("", false) if the user cancels.
-func ShowSaveLinuxDialog(ownerHwnd uintptr, defaultFileName string) (string, bool) {
-	fileBuf := make([]uint16, 4096)
-	if def, err := syscall.UTF16FromString(defaultFileName); err == nil && len(def) < len(fileBuf) {
-		copy(fileBuf, def)
-	}
-
-	filterStr := "Ejecutable de Linux (*)\x00*\x00Todos los archivos (*.*)\x00*.*\x00\x00"
-	filterUTF16 := utf16WithNulls(filterStr)
-	titleUTF16, _ := syscall.UTF16PtrFromString("Guardar cliente Linux")
-
-	ofn := openFileNameW{
-		LStructSize:  uint32(unsafe.Sizeof(openFileNameW{})),
-		HwndOwner:    ownerHwnd,
-		LpstrFilter:  &filterUTF16[0],
-		NFilterIndex: 1,
-		LpstrFile:    &fileBuf[0],
-		NMaxFile:     uint32(len(fileBuf)),
-		LpstrTitle:   titleUTF16,
-		Flags:        ofnOverwritePrompt | ofnPathMustExist | ofnNoChangeDir | ofnExplorer,
-	}
-
-	ok, _, _ := procGetSaveFileNameW.Call(uintptr(unsafe.Pointer(&ofn)))
-	if ok == 0 {
-		return "", false
-	}
-	return syscall.UTF16ToString(fileBuf), true
-}
-
 // ShowOpenLogoDialog opens the native Windows file picker for a PNG/JPEG logo image.
 // Returns ("", false) if the user cancels.
 func ShowOpenLogoDialog(ownerHwnd uintptr) (string, bool) {

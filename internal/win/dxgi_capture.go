@@ -11,11 +11,14 @@ import (
 
 var (
 	d3d11DLL = syscall.NewLazyDLL("d3d11.dll")
+	dxgiDLL  = syscall.NewLazyDLL("dxgi.dll")
 
-	procD3D11CreateDevice = d3d11DLL.NewProc("D3D11CreateDevice")
+	procD3D11CreateDevice  = d3d11DLL.NewProc("D3D11CreateDevice")
+	procCreateDXGIFactory1 = dxgiDLL.NewProc("CreateDXGIFactory1")
 )
 
 const (
+	d3dDriverTypeUnknown  = 0
 	d3dDriverTypeHardware = 1
 	d3d11SDKVersion       = 7
 	d3dFeatureLevel11_0   = 0xb000
@@ -25,6 +28,9 @@ const (
 	d3d11MapRead           = 1
 	dxgiFormatB8G8R8A8Unrm = 87
 
+	dxgiModeRotationUnspecified = 0
+	dxgiModeRotationIdentity    = 1
+
 	dxgiErrorNotFound    uint32 = 0x887A0002
 	dxgiErrorAccessLost  uint32 = 0x887A0026
 	dxgiErrorWaitTimeout uint32 = 0x887A0027
@@ -32,6 +38,9 @@ const (
 	// Verified 0-based COM vtable indices from Windows SDK (d3d11.h / dxgi.h / dxgi1_2.h).
 	vtblIUnknownQueryInterface = 0
 	vtblIUnknownRelease        = 2
+
+	vtblIDXGIFactory1EnumAdapters1 = 12
+	vtblIDXGIAdapterEnumOutput     = 7
 
 	vtblID3D11DeviceCreateTexture2D = 5
 
@@ -41,9 +50,6 @@ const (
 	vtblID3D11DeviceContextCopyResource          = 47
 
 	vtblID3D11Texture2DGetDesc = 10
-
-	vtblIDXGIDeviceGetAdapter  = 7
-	vtblIDXGIAdapterEnumOutput = 7
 
 	vtblIDXGIOutputGetDesc          = 7
 	vtblIDXGIOutput1DuplicateOutput = 22
@@ -62,7 +68,7 @@ type guid struct {
 }
 
 var (
-	iidIDXGIDevice    = guid{0x54ec77fa, 0x1377, 0x44e6, [8]byte{0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c}}
+	iidIDXGIFactory1  = guid{0x770aae78, 0xf26f, 0x4dba, [8]byte{0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}}
 	iidIDXGIOutput1   = guid{0x00cddea8, 0x939b, 0x4b83, [8]byte{0xa3, 0x40, 0xa6, 0x85, 0x22, 0x66, 0x66, 0xcc}}
 	iidID3D11Texture2 = guid{0x6f15aaf2, 0xd208, 0x4e89, [8]byte{0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c}}
 )
@@ -161,7 +167,8 @@ func comQueryInterface(obj uintptr, iid *guid) (uintptr, uint32) {
 }
 
 // dxgiCapturer implements hardware-accelerated Windows 8/10/11 screen capture via
-// IDXGIOutputDuplication with GPU dirty/move rectangle extraction and minimal staging copies.
+// IDXGIOutputDuplication across single-GPU and multi-GPU (Optimus/hybrid) setups,
+// with GPU dirty/move rectangle extraction, HDR/rotation safety checks, and cursor overlay.
 type dxgiCapturer struct {
 	device  uintptr
 	context uintptr
@@ -210,6 +217,49 @@ func (d *dxgiCapturer) Close() {
 	d.prevCursorRC = image.Rectangle{}
 }
 
+// findAdapterAndOutput enumerates every DXGI GPU adapter (supporting hybrid/Optimus laptops
+// and multi-GPU desktops) to locate the exact adapter + output matching target monitor bounds.
+func findAdapterAndOutput(targetX, targetY, targetW, targetH int) (adapter, output uintptr, desc dxgiOutputDesc, err error) {
+	if err := procCreateDXGIFactory1.Find(); err != nil {
+		return 0, 0, dxgiOutputDesc{}, errDXGIUnsupported
+	}
+	var factory uintptr
+	hrU, _, _ := procCreateDXGIFactory1.Call(uintptr(unsafe.Pointer(&iidIDXGIFactory1)), uintptr(unsafe.Pointer(&factory)))
+	if int32(uint32(hrU)) < 0 || factory == 0 {
+		return 0, 0, dxgiOutputDesc{}, errDXGIUnsupported
+	}
+	defer comRelease(factory)
+
+	for ai := uintptr(0); ai < 16; ai++ {
+		var ad uintptr
+		hr := uint32(comVtblCall(factory, vtblIDXGIFactory1EnumAdapters1, ai, uintptr(unsafe.Pointer(&ad))))
+		if hr == dxgiErrorNotFound || int32(hr) < 0 || ad == 0 {
+			break
+		}
+		for oi := uintptr(0); oi < 16; oi++ {
+			var out uintptr
+			hr2 := uint32(comVtblCall(ad, vtblIDXGIAdapterEnumOutput, oi, uintptr(unsafe.Pointer(&out))))
+			if hr2 == dxgiErrorNotFound || int32(hr2) < 0 || out == 0 {
+				break
+			}
+			var od dxgiOutputDesc
+			if hr3 := uint32(comVtblCall(out, vtblIDXGIOutputGetDesc, uintptr(unsafe.Pointer(&od)))); int32(hr3) >= 0 {
+				ow := int(od.DesktopCoordinates.Right - od.DesktopCoordinates.Left)
+				oh := int(od.DesktopCoordinates.Bottom - od.DesktopCoordinates.Top)
+				if od.AttachedToDesktop != 0 &&
+					int(od.DesktopCoordinates.Left) == targetX &&
+					int(od.DesktopCoordinates.Top) == targetY &&
+					ow == targetW && oh == targetH {
+					return ad, out, od, nil
+				}
+			}
+			comRelease(out)
+		}
+		comRelease(ad)
+	}
+	return 0, 0, dxgiOutputDesc{}, errDXGIUnsupported
+}
+
 func (d *dxgiCapturer) initForBounds(targetX, targetY, targetW, targetH int) error {
 	if d.dupl != 0 && d.originX == targetX && d.originY == targetY && d.width == targetW && d.height == targetH {
 		return nil
@@ -220,14 +270,27 @@ func (d *dxgiCapturer) initForBounds(targetX, targetY, targetW, targetH int) err
 		return errDXGIUnsupported
 	}
 
+	adapter, matchedOutput, matchedDesc, err := findAdapterAndOutput(targetX, targetY, targetW, targetH)
+	if err != nil {
+		return err
+	}
+	defer comRelease(adapter)
+	defer comRelease(matchedOutput)
+
+	// Portrait / rotated displays need rotation transforms; delegate those safely to GDI BitBlt.
+	if matchedDesc.Rotation != dxgiModeRotationUnspecified && matchedDesc.Rotation != dxgiModeRotationIdentity {
+		return errDXGIUnsupported
+	}
+
 	featureLevels := [1]uint32{d3dFeatureLevel11_0}
 	var chosenLevel uint32
 	var dev, ctx uintptr
+	// When passing a non-null IDXGIAdapter, D3D11CreateDevice requires D3D_DRIVER_TYPE_UNKNOWN (0).
 	hrU, _, _ := procD3D11CreateDevice.Call(
-		0, // default adapter
-		d3dDriverTypeHardware,
-		0, // no software rasterizer
-		0, // flags
+		adapter,
+		d3dDriverTypeUnknown,
+		0,
+		0,
 		uintptr(unsafe.Pointer(&featureLevels[0])),
 		1,
 		d3d11SDKVersion,
@@ -240,53 +303,6 @@ func (d *dxgiCapturer) initForBounds(targetX, targetY, targetW, targetH int) err
 		comRelease(dev)
 		return errDXGIUnsupported
 	}
-
-	dxgiDev, hr := comQueryInterface(dev, &iidIDXGIDevice)
-	if int32(hr) < 0 || dxgiDev == 0 {
-		comRelease(ctx)
-		comRelease(dev)
-		return errDXGIUnsupported
-	}
-	defer comRelease(dxgiDev)
-
-	var adapter uintptr
-	if hr = uint32(comVtblCall(dxgiDev, vtblIDXGIDeviceGetAdapter, uintptr(unsafe.Pointer(&adapter)))); int32(hr) < 0 || adapter == 0 {
-		comRelease(ctx)
-		comRelease(dev)
-		return errDXGIUnsupported
-	}
-	defer comRelease(adapter)
-
-	// Enumerate DXGI outputs on the adapter to find the one matching the requested monitor bounds.
-	var matchedOutput uintptr
-	var matchedDesc dxgiOutputDesc
-	for idx := uintptr(0); idx < 16; idx++ {
-		var out uintptr
-		hr = uint32(comVtblCall(adapter, vtblIDXGIAdapterEnumOutput, idx, uintptr(unsafe.Pointer(&out))))
-		if hr == dxgiErrorNotFound || int32(hr) < 0 || out == 0 {
-			break
-		}
-		var desc dxgiOutputDesc
-		if hr2 := uint32(comVtblCall(out, vtblIDXGIOutputGetDesc, uintptr(unsafe.Pointer(&desc)))); int32(hr2) >= 0 {
-			ow := int(desc.DesktopCoordinates.Right - desc.DesktopCoordinates.Left)
-			oh := int(desc.DesktopCoordinates.Bottom - desc.DesktopCoordinates.Top)
-			if desc.AttachedToDesktop != 0 &&
-				int(desc.DesktopCoordinates.Left) == targetX &&
-				int(desc.DesktopCoordinates.Top) == targetY &&
-				ow == targetW && oh == targetH {
-				matchedOutput = out
-				matchedDesc = desc
-				break
-			}
-		}
-		comRelease(out)
-	}
-	if matchedOutput == 0 {
-		comRelease(ctx)
-		comRelease(dev)
-		return errDXGIUnsupported
-	}
-	defer comRelease(matchedOutput)
 
 	output1, hr := comQueryInterface(matchedOutput, &iidIDXGIOutput1)
 	if int32(hr) < 0 || output1 == 0 {
@@ -313,7 +329,6 @@ func (d *dxgiCapturer) initForBounds(targetX, targetY, targetW, targetH int) err
 		return errDXGIUnsupported
 	}
 
-	// Create reusable CPU-readable staging texture matching the desktop surface.
 	stagingDesc := d3d11Texture2DDesc{
 		Width:          uint32(w),
 		Height:         uint32(h),
@@ -359,7 +374,7 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 	var res uintptr
 	timeoutMs := uintptr(16)
 	if forceFull && d.hasBase {
-		timeoutMs = 0 // non-blocking check when a keyframe is explicitly requested
+		timeoutMs = 0
 	}
 	hr := uint32(comVtblCall(d.dupl, vtblIDXGIOutputDuplicationAcquireNextFrame, timeoutMs, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&res))))
 
@@ -367,7 +382,6 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 		if !d.hasBase {
 			return nil, nil, false, nil
 		}
-		// Check if cursor moved even though desktop pixels didn't change.
 		cursorRects, cursorMoved := d.updateCursorOverlay()
 		if forceFull {
 			return d.frameBGRA, nil, true, nil
@@ -383,7 +397,6 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 		return nil, nil, false, errors.New("dxgi access lost")
 	}
 
-	// Ensure frame is always released back to DXGI.
 	defer func() {
 		comRelease(res)
 		comVtblCall(d.dupl, vtblIDXGIOutputDuplicationReleaseFrame)
@@ -408,7 +421,14 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 	}
 	defer comRelease(tex)
 
-	// Extract GPU dirty & move rectangles when available and we already have a base frame.
+	// Guard against HDR (R16G16B16A16_FLOAT) or dynamic resolution mismatches so CopyResource never produces black frames.
+	var texDesc d3d11Texture2DDesc
+	comVtblCall(tex, vtblID3D11Texture2DGetDesc, uintptr(unsafe.Pointer(&texDesc)))
+	if texDesc.Format != dxgiFormatB8G8R8A8Unrm || int(texDesc.Width) != d.width || int(texDesc.Height) != d.height {
+		d.Close()
+		return nil, nil, false, errDXGIUnsupported
+	}
+
 	var dirtyRects []image.Rectangle
 	needFullCopy := !d.hasBase || forceFull || info.TotalMetadataBufferSize == 0
 	if !needFullCopy {
@@ -462,7 +482,7 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 		copy(d.frameBGRA, d.cleanBGRA)
 		d.hasBase = true
 		d.prevCursorRC = image.Rectangle{}
-		dirtyRects = nil // full encode
+		dirtyRects = nil
 	} else {
 		for _, r := range dirtyRects {
 			rowBytes := r.Dx() * 4
@@ -477,7 +497,6 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 
 	comVtblCall(d.context, vtblID3D11DeviceContextUnmap, d.staging, 0)
 
-	// Composite cursor over frameBGRA and include cursor dirty rects if doing partial update.
 	cursorRects, _ := d.updateCursorOverlay()
 	if !needFullCopy && len(cursorRects) > 0 {
 		dirtyRects = append(dirtyRects, cursorRects...)
@@ -490,7 +509,6 @@ func (d *dxgiCapturer) extractDirtyRects(metaBytes uint32) []image.Rectangle {
 	screen := image.Rect(0, 0, d.width, d.height)
 	var out []image.Rectangle
 
-	// 1. Move rects: treat each destination rect as dirty for tile encoding.
 	maxMoves := int(metaBytes)/int(unsafe.Sizeof(dxgiOutduplMoveRect{})) + 1
 	if cap(d.moveBuf) < maxMoves {
 		d.moveBuf = make([]dxgiOutduplMoveRect, maxMoves)
@@ -516,7 +534,6 @@ func (d *dxgiCapturer) extractDirtyRects(metaBytes uint32) []image.Rectangle {
 		}
 	}
 
-	// 2. Dirty rects reported directly by the GPU compositor.
 	maxDirty := int(metaBytes)/int(unsafe.Sizeof(rect{})) + 1
 	if cap(d.dirtyBuf) < maxDirty {
 		d.dirtyBuf = make([]rect, maxDirty)
@@ -608,8 +625,6 @@ func (d *dxgiCapturer) releaseCursorSurface() {
 	d.curBits = nil
 }
 
-// updateCursorOverlay restores the previous cursor area from cleanBGRA and draws the live
-// cursor onto frameBGRA inside a tiny 64x64 patch, returning dirty rects and whether cursor changed.
 func (d *dxgiCapturer) updateCursorOverlay() ([]image.Rectangle, bool) {
 	if !d.hasBase {
 		return nil, false
@@ -645,7 +660,6 @@ func (d *dxgiCapturer) updateCursorOverlay() ([]image.Rectangle, bool) {
 	var dirty []image.Rectangle
 	stride := d.width * 4
 
-	// 1. Restore previous cursor patch from cleanBGRA.
 	if !d.prevCursorRC.Empty() {
 		rowBytes := d.prevCursorRC.Dx() * 4
 		for y := d.prevCursorRC.Min.Y; y < d.prevCursorRC.Max.Y; y++ {
@@ -657,11 +671,9 @@ func (d *dxgiCapturer) updateCursorOverlay() ([]image.Rectangle, bool) {
 		}
 	}
 
-	// 2. Render new cursor over clean background patch and blit into frameBGRA.
 	if !newRC.Empty() && d.ensureCursorSurface() {
 		pw := newRC.Dx()
 		ph := newRC.Dy()
-		// Seed patch with clean desktop pixels so XOR/inverted I-beam cursors render accurately!
 		clear(d.curBits)
 		for y := 0; y < ph; y++ {
 			srcOff := (newRC.Min.Y+y)*stride + newRC.Min.X*4
