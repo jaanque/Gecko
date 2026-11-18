@@ -12,3 +12,11 @@ func embeddedClientTemplate() []byte {
 	}
 	return data
 }
+
+func embeddedLinuxClientTemplate() []byte {
+	data, err := assetFiles.ReadFile("assets/client_template_linux")
+	if err != nil {
+		return nil
+	}
+	return data
+}

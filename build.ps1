@@ -12,15 +12,21 @@ function Show-Bar([int]$Pct, [string]$Msg) {
 New-Item -ItemType Directory -Force -Path "cmd\admin\assets", "dist" | Out-Null
 
 $env:GOOS = "windows"
-Show-Bar 20 "Cliente..."
+Show-Bar 20 "Cliente (Win)..."
 go build -trimpath -ldflags="-H=windowsgui -s -w" -o "cmd\admin\assets\client_template.exe" ./cmd/client
 if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
 
-Show-Bar 50 "Admin..."
+$env:GOOS = "linux"
+Show-Bar 40 "Cliente (Linux)..."
+go build -trimpath -ldflags="-s -w" -o "cmd\admin\assets\client_template_linux" ./cmd/client
+if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
+
+$env:GOOS = "windows"
+Show-Bar 60 "Admin..."
 go build -trimpath -ldflags="-H=windowsgui -s -w" -o "dist\AdminRemoto.exe" ./cmd/admin
 if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
 
-Show-Bar 75 "Relay (Win)..."
+Show-Bar 80 "Relay (Win)..."
 go build -trimpath -ldflags="-s -w" -o "dist\RelayServidor.exe" ./cmd/relay
 if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
 

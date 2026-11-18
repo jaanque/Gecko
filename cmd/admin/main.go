@@ -30,7 +30,8 @@ func main() {
 
 	relayClient := admin.NewRelayClient(resolvedDataDir)
 	prof, hasProf := relayClient.Profile()
-	template := embeddedClientTemplate()
+	winTemplate := embeddedClientTemplate()
+	linuxTemplate := embeddedLinuxClientTemplate()
 
 	window := win.NewAdminWindow(win.AdminConfig{
 		HasProfile: hasProf,
@@ -60,8 +61,12 @@ func main() {
 		OnSelectMonitor: func(monitorIndex int) {
 			relayClient.SendSelectMonitor(monitorIndex)
 		},
-		OnGenerateClient: func(logoPNG []byte, destPath string) error {
-			built, err := relayClient.GenerateClientBinary(template, logoPNG)
+		OnGenerateClient: func(platform string, logoPNG []byte, destPath string) error {
+			tmpl := winTemplate
+			if platform == "linux" {
+				tmpl = linuxTemplate
+			}
+			built, err := relayClient.GenerateClientBinary(tmpl, logoPNG)
 			if err != nil {
 				return err
 			}

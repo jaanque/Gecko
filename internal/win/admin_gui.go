@@ -73,7 +73,7 @@ type AdminCallbacks struct {
 	OnFrameAck       func(frameID uint32)
 	OnQuality        func(quality int)
 	OnSelectMonitor  func(monitorIndex int)
-	OnGenerateClient func(logoPNG []byte, destPath string) error
+	OnGenerateClient func(platform string, logoPNG []byte, destPath string) error
 	OnSaveServer     func(profile security.RelayProfile) error
 	OnClose          func()
 }
@@ -928,25 +928,39 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch, pad, topY int32, ha
 	}
 	drawLine(memDC, cardRC.Left+1, footerTop, cardRC.Right-1, footerTop, rgb(228, 228, 231))
 
-	saveW := a.scale(148)
+	saveWinW := a.scale(148)
+	saveLinW := a.scale(132)
+	saveGap := a.scale(10)
 	saveH := a.scale(36)
-	saveRC := rect{rightEdge - saveW, footerTop + (footerH-saveH)/2, rightEdge, footerTop + (footerH+saveH)/2}
-	saveIdx := len(a.hits)
-	a.hits = append(a.hits, adminHitRegion{kind: "save_client", rc: saveRC})
+	btnTop := footerTop + (footerH-saveH)/2
+
+	saveWinRC := rect{rightEdge - saveWinW, btnTop, rightEdge, btnTop + saveH}
+	saveWinIdx := len(a.hits)
+	a.hits = append(a.hits, adminHitRegion{kind: "save_client_win", rc: saveWinRC})
+
+	saveLinRC := rect{saveWinRC.Left - saveGap - saveLinW, btnTop, saveWinRC.Left - saveGap, btnTop + saveH}
+	saveLinIdx := len(a.hits)
+	a.hits = append(a.hits, adminHitRegion{kind: "save_client_linux", rc: saveLinRC})
 
 	if !hasProfile {
 		procSelectObject.Call(memDC, a.fontSmall)
 		procSetTextColor.Call(memDC, rgb(185, 28, 28))
-		fRC := rect{innerL, footerTop, saveRC.Left - a.scale(12), footerTop + footerH}
+		fRC := rect{innerL, footerTop, saveLinRC.Left - a.scale(12), footerTop + footerH}
 		drawText(memDC, "Configura el servidor primero", &fRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 	}
 
-	saveBg := rgb(24, 24, 27)
-	if a.hoverIdx == saveIdx {
-		saveBg = rgb(39, 39, 42)
+	linBg := rgb(255, 255, 255)
+	if a.hoverIdx == saveLinIdx {
+		linBg = rgb(244, 244, 245)
 	}
 	procSelectObject.Call(memDC, a.fontBtn)
-	drawFlatButton(memDC, saveRC, a.scale(6), saveBg, saveBg, rgb(255, 255, 255), "Guardar .exe")
+	drawFlatButton(memDC, saveLinRC, a.scale(6), linBg, rgb(212, 212, 216), rgb(24, 24, 27), "Guardar Linux")
+
+	winBg := rgb(24, 24, 27)
+	if a.hoverIdx == saveWinIdx {
+		winBg = rgb(39, 39, 42)
+	}
+	drawFlatButton(memDC, saveWinRC, a.scale(6), winBg, winBg, rgb(255, 255, 255), "Guardar .exe")
 }
 
 func (a *AdminWindow) paintServerTab(memDC uintptr, cw, ch int32, hasProfile, relayOK bool, relayDetail string, profile security.RelayProfile) {
@@ -1065,8 +1079,11 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 		a.logoName = ""
 		procInvalidateRect.Call(hwnd, 0, 0)
 
-	case "save_client":
-		a.handleSaveClient(hwnd)
+	case "save_client_win":
+		a.handleSaveClient(hwnd, "windows")
+
+	case "save_client_linux":
+		a.handleSaveClient(hwnd, "linux")
 
 	case "cancel_pending":
 		a.mu.Lock()
@@ -1154,7 +1171,7 @@ func (a *AdminWindow) handlePickLogo(hwnd uintptr) {
 	procInvalidateRect.Call(hwnd, 0, 0)
 }
 
-func (a *AdminWindow) handleSaveClient(hwnd uintptr) {
+func (a *AdminWindow) handleSaveClient(hwnd uintptr, platform string) {
 	a.mu.Lock()
 	hasProf := a.hasProfile
 	a.mu.Unlock()
@@ -1163,20 +1180,30 @@ func (a *AdminWindow) handleSaveClient(hwnd uintptr) {
 		return
 	}
 
-	destPath, ok := ShowSaveExeDialog(hwnd, "ClientRemot.exe")
+	var destPath string
+	var ok bool
+	if platform == "linux" {
+		destPath, ok = ShowSaveLinuxDialog(hwnd, "ClientRemot")
+	} else {
+		destPath, ok = ShowSaveExeDialog(hwnd, "ClientRemot.exe")
+	}
 	if !ok || destPath == "" {
 		return
 	}
 
 	if a.callbacks.OnGenerateClient != nil {
-		if err := a.callbacks.OnGenerateClient(a.logoPNG, destPath); err != nil {
+		if err := a.callbacks.OnGenerateClient(platform, a.logoPNG, destPath); err != nil {
 			ShowMessageBox(hwnd, "Error", err.Error(), true)
 			return
 		}
 	}
 
+	notice := "Guardado: " + filepath.Base(destPath)
+	if platform == "linux" {
+		notice = "Guardado: " + filepath.Base(destPath) + " (en Linux: chmod +x " + filepath.Base(destPath) + ")"
+	}
 	a.mu.Lock()
-	a.noticeText = "Guardado: " + filepath.Base(destPath)
+	a.noticeText = notice
 	a.noticeIsError = false
 	a.mu.Unlock()
 	a.syncServerControls(hwnd)

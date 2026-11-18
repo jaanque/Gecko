@@ -1,5 +1,3 @@
-//go:build windows
-
 package main
 
 import (
@@ -17,15 +15,14 @@ import (
 	"remote-control/internal/config"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
-	"remote-control/internal/win"
 )
 
 type clientAgent struct {
 	cfg      config.ClientConfig
 	tlsCfg   *tls.Config
 	hostname string
-	window   *win.ClientWindow
-	injector *win.InputInjector
+	window   clientWindow
+	injector inputInjector
 
 	mu           sync.Mutex
 	conn         net.Conn
@@ -44,7 +41,7 @@ type clientAgent struct {
 }
 
 func main() {
-	win.EnableDPIAwareness()
+	platformInit()
 
 	flagServer := flag.String("server", "", "Admin server address (dev override)")
 	flagPin := flag.String("pin", "", "Admin TLS cert SHA-256 fingerprint (dev override)")
@@ -72,12 +69,12 @@ func main() {
 	agent := &clientAgent{
 		cfg:       cfg,
 		hostname:  hostname,
-		injector:  win.NewInputInjector(),
+		injector:  newPlatformInjector(),
 		ackWakeCh: make(chan struct{}, 1),
 	}
 	agent.quality.Store(78)
 
-	window := win.NewClientWindow(hostname, cfg.LogoPNG, win.ClientCallbacks{
+	window := newPlatformWindow(hostname, cfg.LogoPNG, clientWindowCallbacks{
 		OnAllow:      agent.onUserAllow,
 		OnDeny:       agent.onUserDeny,
 		OnDisconnect: agent.onUserDisconnect,
@@ -91,7 +88,7 @@ func main() {
 	if cfgErr != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(win.UIStateError, "Sense configuració")
+			window.SetState(uiError, "Sense configuració")
 		}()
 		_ = window.Run()
 		return
@@ -101,7 +98,7 @@ func main() {
 	if err != nil {
 		go func() {
 			<-window.Ready()
-			window.SetState(win.UIStateError, "Certificat no vàlid")
+			window.SetState(uiError, "Certificat no vàlid")
 		}()
 		_ = window.Run()
 		return
@@ -123,7 +120,7 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		a.window.SetState(win.UIStateConnecting, "Connectant...")
+		a.window.SetState(uiConnecting, "Connectant...")
 
 		err := a.connectAndServe(ctx)
 		a.cleanupAfterDisconnect()
@@ -133,10 +130,10 @@ func (a *clientAgent) runLoop(ctx context.Context) {
 		}
 		if err != nil {
 			if errors.Is(err, errAuthRejected) {
-				a.window.SetState(win.UIStateError, "Accés rebutjat")
+				a.window.SetState(uiError, "Accés rebutjat")
 				backoff = 5 * time.Second
 			} else {
-				a.window.SetState(win.UIStateConnecting, "Reconnectant...")
+				a.window.SetState(uiConnecting, "Reconnectant...")
 			}
 		}
 
@@ -182,17 +179,11 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	}()
 	defer close(doneConn)
 
-	winMons := win.EnumMonitors()
-	protoMons := make([]protocol.MonitorInfo, 0, len(winMons))
-	for _, m := range winMons {
-		protoMons = append(protoMons, protocol.MonitorInfo{
-			Index:   m.Index,
-			Width:   m.Width,
-			Height:  m.Height,
-			Primary: m.Primary,
-		})
+	protoMons := enumPlatformMonitors()
+	w, h := 1280, 720
+	if len(protoMons) > 0 {
+		w, h = protoMons[0].Width, protoMons[0].Height
 	}
-	w, h := winMons[0].Width, winMons[0].Height
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := protocol.WriteJSON(conn, protocol.MsgAuth, protocol.AuthPayload{
 		Token:    a.cfg.AuthToken,
@@ -221,7 +212,7 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 	a.conn = conn
 	a.mu.Unlock()
 
-	a.window.SetState(win.UIStateOnline, "En línia")
+	a.window.SetState(uiOnline, "En línia")
 
 	// Start periodic heartbeat ping.
 	pingDone := make(chan struct{})
@@ -339,7 +330,7 @@ func (a *clientAgent) handleConsentRequest(req protocol.ConsentReqPayload) {
 	})
 	a.mu.Unlock()
 
-	a.window.SetState(win.UIStatePrompt, "")
+	a.window.SetState(uiPrompt, "")
 }
 
 func (a *clientAgent) expirePendingPrompt(sessionID string) {
@@ -360,7 +351,7 @@ func (a *clientAgent) expirePendingPrompt(sessionID string) {
 			Reason:    "Temps d'espera esgotat",
 		})
 	}
-	a.window.SetState(win.UIStateOnline, "En línia")
+	a.window.SetState(uiOnline, "En línia")
 }
 
 func (a *clientAgent) onUserAllow() {
@@ -394,7 +385,7 @@ func (a *clientAgent) onUserAllow() {
 		return
 	}
 
-	a.window.SetState(win.UIStateActive, "")
+	a.window.SetState(uiActive, "")
 	a.monitorIdx.Store(0) // Always start on Monitor 1
 	a.forceKeyframe.Store(true)
 	go a.streamScreen(streamCtx, conn, sid)
@@ -422,12 +413,12 @@ func (a *clientAgent) onUserDeny() {
 			Reason:    "Denegat per l'usuari",
 		})
 	}
-	a.window.SetState(win.UIStateOnline, "En línia")
+	a.window.SetState(uiOnline, "En línia")
 }
 
 func (a *clientAgent) onUserDisconnect() {
 	a.stopAllSessions("Desconnectat per l'usuari")
-	a.window.SetState(win.UIStateOnline, "En línia")
+	a.window.SetState(uiOnline, "En línia")
 }
 
 func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
@@ -455,7 +446,7 @@ func (a *clientAgent) handleRemoteSessionStop(sessionID string) {
 	if changed {
 		a.injector.ReleaseAllKeys()
 		if connected {
-			a.window.SetState(win.UIStateOnline, "En línia")
+			a.window.SetState(uiOnline, "En línia")
 		}
 	}
 }
@@ -509,7 +500,7 @@ func (a *clientAgent) isSessionActive() bool {
 }
 
 func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid string) {
-	capturer := win.NewScreenCapturer()
+	capturer := newPlatformCapturer()
 	defer capturer.Close()
 
 	a.lastSentFrameID.Store(0)

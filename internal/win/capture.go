@@ -3,18 +3,11 @@
 package win
 
 import (
-	"bytes"
-	"compress/zlib"
-	"encoding/binary"
 	"errors"
-	"image"
-	"image/jpeg"
-	"runtime"
-	"sync"
 	"syscall"
 	"unsafe"
 
-	"remote-control/internal/protocol"
+	"remote-control/internal/video"
 )
 
 var (
@@ -49,8 +42,6 @@ const (
 	biRGB         = 0
 	cursorShowing = 0x00000001
 	diNormal      = 0x0003
-
-	tileSize = 64
 )
 
 type bitmapInfoHeader struct {
@@ -92,123 +83,6 @@ type iconInfo struct {
 	HbmColor uintptr
 }
 
-type tileJob struct {
-	tx, ty, tw, th int
-}
-
-type encodedTile struct {
-	tx, ty, tw, th uint16
-	codec          uint8
-	data           []byte
-}
-
-type tileEncoderWorker struct {
-	tileRGBA *image.RGBA
-	bgrBuf   []byte
-	compBuf  bytes.Buffer
-	zw       *zlib.Writer
-}
-
-func newTileEncoderWorker() *tileEncoderWorker {
-	w := &tileEncoderWorker{
-		tileRGBA: image.NewRGBA(image.Rect(0, 0, tileSize, tileSize)),
-		bgrBuf:   make([]byte, tileSize*tileSize*3),
-	}
-	w.zw, _ = zlib.NewWriterLevel(&w.compBuf, zlib.BestSpeed)
-	return w
-}
-
-func (w *tileEncoderWorker) encode(currBGRA []byte, stride int, job tileJob, quality int) (encodedTile, bool) {
-	tx, ty, tw, th := job.tx, job.ty, job.tw, job.th
-
-	// In Estándar (78) and Alta (92) modes, encode crisp UI/text tiles losslessly via fast Zlib-BGR
-	// so small text and ClearType edges stay 100% razor-sharp without JPEG chroma blur.
-	if quality >= 70 && isCrispUITile(currBGRA, stride, tx, ty, tw, th) {
-		bgr := w.bgrBuf[:tw*th*3]
-		p := 0
-		for row := 0; row < th; row++ {
-			srcOff := (ty+row)*stride + tx*4
-			srcRow := currBGRA[srcOff : srcOff+tw*4]
-			for i := 0; i < tw*4; i += 4 {
-				bgr[p+0] = srcRow[i+0] // B
-				bgr[p+1] = srcRow[i+1] // G
-				bgr[p+2] = srcRow[i+2] // R
-				p += 3
-			}
-		}
-
-		w.compBuf.Reset()
-		w.zw.Reset(&w.compBuf)
-		_, err1 := w.zw.Write(bgr)
-		err2 := w.zw.Close()
-		if err1 == nil && err2 == nil {
-			comp := w.compBuf.Bytes()
-			// Only keep lossless if it actually compresses cleanly (flat UI/text tiles compress to < 1.8 B/px).
-			if len(comp) > 0 && len(comp) <= (tw*th*9)/5 {
-				out := make([]byte, len(comp))
-				copy(out, comp)
-				return encodedTile{
-					tx: uint16(tx), ty: uint16(ty), tw: uint16(tw), th: uint16(th),
-					codec: protocol.TileCodecZlibBGR,
-					data:  out,
-				}, true
-			}
-		}
-	}
-
-	// Photographic / video / motion tiles -> fast JPEG.
-	subImg := w.tileRGBA.SubImage(image.Rect(0, 0, tw, th)).(*image.RGBA)
-	for row := 0; row < th; row++ {
-		srcOff := (ty+row)*stride + tx*4
-		dstOff := row * subImg.Stride
-		srcRow := currBGRA[srcOff : srcOff+tw*4]
-		dstRow := subImg.Pix[dstOff : dstOff+tw*4]
-		for i := 0; i < tw*4; i += 4 {
-			dstRow[i+0] = srcRow[i+2] // R
-			dstRow[i+1] = srcRow[i+1] // G
-			dstRow[i+2] = srcRow[i+0] // B
-			dstRow[i+3] = 255
-		}
-	}
-
-	w.compBuf.Reset()
-	if err := jpeg.Encode(&w.compBuf, subImg, &jpeg.Options{Quality: quality}); err != nil {
-		return encodedTile{}, false
-	}
-	jpg := w.compBuf.Bytes()
-	out := make([]byte, len(jpg))
-	copy(out, jpg)
-	return encodedTile{
-		tx: uint16(tx), ty: uint16(ty), tw: uint16(tw), th: uint16(th),
-		codec: protocol.TileCodecJPEG,
-		data:  out,
-	}, true
-}
-
-// isCrispUITile checks in microseconds whether a tile looks like crisp UI/text
-// (high horizontal pixel-run coherence typical of editors, documents, menus, and ClearType text).
-func isCrispUITile(bgra []byte, stride, tx, ty, tw, th int) bool {
-	if tw < 4 || th < 4 {
-		return false
-	}
-	same := 0
-	total := 0
-	for row := 0; row < th; row += 2 {
-		off := (ty+row)*stride + tx*4
-		prevB, prevG, prevR := bgra[off], bgra[off+1], bgra[off+2]
-		for x := 1; x < tw; x++ {
-			o := off + x*4
-			b, g, r := bgra[o], bgra[o+1], bgra[o+2]
-			if b == prevB && g == prevG && r == prevR {
-				same++
-			}
-			prevB, prevG, prevR = b, g, r
-			total++
-		}
-	}
-	return total > 0 && same*100 >= total*48
-}
-
 // ScreenCapturer captures a specific Windows monitor or the full virtual desktop
 // using parallel 64x64 hybrid lossless-UI + JPEG tile encoding.
 type ScreenCapturer struct {
@@ -220,30 +94,13 @@ type ScreenCapturer struct {
 	width    int
 	height   int
 	currBGRA []byte
-	prevBGRA []byte
-	hasPrev  bool
-
-	workers []*tileEncoderWorker
-	jobs    []tileJob
-	results []encodedTile
-	outBuf  bytes.Buffer
+	encoder  *video.TileEncoder
 }
 
 // NewScreenCapturer constructs a reusable multi-core ScreenCapturer.
 func NewScreenCapturer() *ScreenCapturer {
-	n := runtime.NumCPU()
-	if n > 8 {
-		n = 8
-	}
-	if n < 1 {
-		n = 1
-	}
-	workers := make([]*tileEncoderWorker, n)
-	for i := range workers {
-		workers[i] = newTileEncoderWorker()
-	}
 	return &ScreenCapturer{
-		workers: workers,
+		encoder: video.NewTileEncoder(),
 	}
 }
 
@@ -251,8 +108,9 @@ func NewScreenCapturer() *ScreenCapturer {
 func (sc *ScreenCapturer) Close() {
 	sc.releaseGDI()
 	sc.currBGRA = nil
-	sc.prevBGRA = nil
-	sc.hasPrev = false
+	if sc.encoder != nil {
+		sc.encoder.Close()
+	}
 }
 
 func (sc *ScreenCapturer) releaseGDI() {
@@ -294,24 +152,14 @@ func (sc *ScreenCapturer) ensureSurface(hdcScreen uintptr, w, h int) error {
 	sc.oldObj = oldObj
 	sc.width = w
 	sc.height = h
-
-	byteLen := w * h * 4
-	sc.currBGRA = make([]byte, byteLen)
-	sc.prevBGRA = make([]byte, byteLen)
-	sc.hasPrev = false
+	sc.currBGRA = make([]byte, w*h*4)
+	sc.encoder.Reset()
 	return nil
 }
 
 // CaptureFrame captures the selected monitor (0 = Monitor 1, -1 = all monitors) and returns
 // an encoded MsgFrame payload containing only changed 64x64 tiles. Returns nil payload if unchanged.
 func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int, forceFull bool) ([]byte, int, int, error) {
-	if quality < 35 {
-		quality = 35
-	}
-	if quality > 95 {
-		quality = 95
-	}
-
 	bounds := ResolveMonitorBounds(monitorIndex)
 	vx := bounds.X
 	vy := bounds.Y
@@ -323,7 +171,7 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int
 	if vx != sc.originX || vy != sc.originY {
 		sc.originX = vx
 		sc.originY = vy
-		sc.hasPrev = false
+		sc.encoder.Reset()
 	}
 
 	hdcScreen, _, _ := procGetDC.Call(0)
@@ -368,123 +216,8 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int
 		return nil, w, h, errors.New("GetDIBits failed")
 	}
 
-	sendAll := forceFull || !sc.hasPrev
-	stride := w * 4
-
-	sc.jobs = sc.jobs[:0]
-	for ty := 0; ty < h; ty += tileSize {
-		th := tileSize
-		if ty+th > h {
-			th = h - ty
-		}
-		for tx := 0; tx < w; tx += tileSize {
-			tw := tileSize
-			if tx+tw > w {
-				tw = w - tx
-			}
-			if sendAll || tileChanged(sc.currBGRA, sc.prevBGRA, stride, tx, ty, tw, th) {
-				sc.jobs = append(sc.jobs, tileJob{tx: tx, ty: ty, tw: tw, th: th})
-			}
-		}
-	}
-
-	// Swap buffers so prevBGRA always holds the latest captured screen.
-	curr := sc.currBGRA
-	sc.currBGRA, sc.prevBGRA = sc.prevBGRA, sc.currBGRA
-	sc.hasPrev = true
-
-	jobCount := len(sc.jobs)
-	if jobCount == 0 {
-		return nil, w, h, nil
-	}
-
-	if cap(sc.results) < jobCount {
-		sc.results = make([]encodedTile, jobCount)
-	} else {
-		sc.results = sc.results[:jobCount]
-	}
-
-	// Encode dirty tiles in parallel when multiple tiles changed.
-	if jobCount <= 3 || len(sc.workers) == 1 {
-		worker := sc.workers[0]
-		for i, job := range sc.jobs {
-			if enc, ok := worker.encode(curr, stride, job, quality); ok {
-				sc.results[i] = enc
-			} else {
-				sc.results[i] = encodedTile{}
-			}
-		}
-	} else {
-		workerCount := len(sc.workers)
-		if workerCount > jobCount {
-			workerCount = jobCount
-		}
-		var wg sync.WaitGroup
-		wg.Add(workerCount)
-		for wi := 0; wi < workerCount; wi++ {
-			worker := sc.workers[wi]
-			go func(start int) {
-				defer wg.Done()
-				for idx := start; idx < jobCount; idx += workerCount {
-					if enc, ok := worker.encode(curr, stride, sc.jobs[idx], quality); ok {
-						sc.results[idx] = enc
-					} else {
-						sc.results[idx] = encodedTile{}
-					}
-				}
-			}(wi)
-		}
-		wg.Wait()
-	}
-
-	// Serialize frame packet.
-	sc.outBuf.Reset()
-	var frameHdr [protocol.FrameHeaderSize]byte
-	sc.outBuf.Write(frameHdr[:])
-
-	var validTiles uint16
-	var thdr [protocol.TileHeaderSize]byte
-	for i := range sc.results {
-		t := &sc.results[i]
-		if len(t.data) == 0 {
-			continue
-		}
-		binary.BigEndian.PutUint16(thdr[0:2], t.tx)
-		binary.BigEndian.PutUint16(thdr[2:4], t.ty)
-		binary.BigEndian.PutUint16(thdr[4:6], t.tw)
-		binary.BigEndian.PutUint16(thdr[6:8], t.th)
-		thdr[8] = t.codec
-		binary.BigEndian.PutUint32(thdr[9:13], uint32(len(t.data)))
-		sc.outBuf.Write(thdr[:])
-		sc.outBuf.Write(t.data)
-		t.data = nil
-		validTiles++
-	}
-
-	if validTiles == 0 {
-		return nil, w, h, nil
-	}
-
-	raw := sc.outBuf.Bytes()
-	binary.BigEndian.PutUint32(raw[0:4], frameID)
-	binary.BigEndian.PutUint16(raw[4:6], uint16(w))
-	binary.BigEndian.PutUint16(raw[6:8], uint16(h))
-	binary.BigEndian.PutUint16(raw[8:10], validTiles)
-
-	result := make([]byte, len(raw))
-	copy(result, raw)
-	return result, w, h, nil
-}
-
-func tileChanged(curr, prev []byte, stride, tx, ty, tw, th int) bool {
-	rowBytes := tw * 4
-	for row := 0; row < th; row++ {
-		off := (ty+row)*stride + tx*4
-		if !bytes.Equal(curr[off:off+rowBytes], prev[off:off+rowBytes]) {
-			return true
-		}
-	}
-	return false
+	pkt := sc.encoder.Encode(frameID, sc.currBGRA, w, h, quality, forceFull)
+	return pkt, w, h, nil
 }
 
 func drawCursor(hdc uintptr, vx, vy int) {
