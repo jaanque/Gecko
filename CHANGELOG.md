@@ -5,15 +5,15 @@ Tots els canvis notables de **Gecko** es documenten en aquest fitxer seguint el 
 ## [Unreleased]
 
 ### Afegit
-- **Captura Windows DXGI Desktop Duplication** en Go pur (COM D3D11/DXGI) amb suport de *dirty rects* de GPU a `video.TileEncoder` i *fallback* transparent a GDI `BitBlt`.
-- **Consola d'administració multiplataforma (Web Admin local)** per a Linux, macOS i Windows (`-web`) amb WebSocket natiu en Go pur, visor HTML5 Canvas, portapapers, enviament de fitxers, `CAD`, cerca i generador de clients.
-- **Suport inicial de client per a macOS** (`internal/darwin`) i **compatibilitat ampliada amb Wayland en Linux** (`wl-copy`/`wl-paste`, captura `grim`/portals i *fallback* de diàleg).
-- **Internacionalització (`ca`, `es`, `en`)** amb detecció automàtica, flag `-lang` i selecció d'idioma al generador de clients.
-- **Versionat integrat** (`-version` a tots els binaris i reportat al protocol).
-- **Credencials mTLS individuals revocables** per client, *rate limiting* per IP al Relay, auditoria de sessions, portapapers bidireccional, transferència de fitxers verificada amb SHA-256 i botó `Ctrl+Alt+Supr`.
+- **Captura Windows DXGI Desktop Duplication** en Go pur (COM D3D11/DXGI) amb suport multi-GPU/Optimus (`IDXGIFactory1::EnumAdapters1`), protecció automàtica per a pantalles HDR i rotades, *dirty rects* de GPU a `video.TileEncoder` i *fallback* transparent a GDI `BitBlt`.
+- **Suport Per-Monitor DPI v2 dinàmic (`WM_DPICHANGED`)** a `AdminRemoto.exe`, el visor remot i `ClientRemot.exe`.
+- **Internacionalització del client (`ca`, `es`, `en`)** seleccionable directament des de la pestanya *Crear cliente* d'`AdminRemoto.exe`, per flag `-lang` o detecció automàtica.
+- **Versionat integrat** (`-version` a tots els binaris, títol de finestra i columna de versió al llistat d'equips).
+- **Credencials mTLS individuals revocables** per client, *rate limiting* per IP al Relay, auditoria de sessions, portapapers bidireccional, transferència de fitxers amb progrés i verificació SHA-256, indicador de latència per colors i botó `Ctrl+Alt+Supr` (`SendSAS`).
 - **Documentació Open Source**: `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `docs/PRODUCCIO.md` i plantilles d'Issues/PR.
 
 ### Canviat
-- Substituïts `build.bat` i `build.ps1` per `go run ./cmd/build` multiplataforma (`amd64` i `arm64`).
-- `RelayServidor` només imprimeix la clau mestra `RMT2:...` en la primera inicialització o amb `-show-key`, elimina crides HTTP externes d'IP pública i inclou `-healthcheck` natiu per a Docker `scratch`.
-- Mogut `FrameBuffer` a `internal/video` i unificats els tipus de UI/monitors a `internal/clientui`.
+- Enfocament 100% natiu per a **Windows** (`amd64` i `arm64`): eliminats els backends de Linux/X11/Wayland, macOS, el panell web i `Dockerfile`, reduint la mida d'`AdminRemoto.exe` a ~11 MB.
+- Substituïts `build.bat` i `build.ps1` per `go run ./cmd/build` (`-arch amd64|arm64`, `-version`).
+- `RelayServidor.exe` només imprimeix la clau mestra `RMT2:...` en la primera inicialització o amb `-show-key`, i elimina crides HTTP externes d'IP pública.
+- Mogut `FrameBuffer` a `internal/video`.
