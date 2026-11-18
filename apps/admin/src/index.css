@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #27272a transparent;
+  }
+
+  body {
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+}

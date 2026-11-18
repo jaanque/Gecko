@@ -1,0 +1,9 @@
+[package]
+name = "rmm-input-win"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rmm-proto = { path = "../rmm-proto" }
+windows.workspace = true
+tracing.workspace = true

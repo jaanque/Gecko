@@ -1,0 +1,27 @@
+[package]
+name = "rmm-agent"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rmm-agent"
+path = "src/main.rs"
+
+[dependencies]
+rmm-proto = { path = "../../crates/rmm-proto" }
+rmm-net = { path = "../../crates/rmm-net" }
+rmm-capture-win = { path = "../../crates/rmm-capture-win" }
+rmm-encode-win = { path = "../../crates/rmm-encode-win" }
+rmm-input-win = { path = "../../crates/rmm-input-win" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+quinn.workspace = true
+postcard.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+uuid.workspace = true
+hostname.workspace = true
+whoami.workspace = true
+windows.workspace = true
