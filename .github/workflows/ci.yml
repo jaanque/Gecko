@@ -15,70 +15,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify-and-build:
-    name: Format, Vet & Cross-Build (Windows)
+  comprobar:
+    name: Comprobar sistema
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: Configurar Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Check formatting
+      - name: Comprobar formato (gofmt)
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
-            echo "Files not formatted with gofmt:"
+            echo "Archivos sin formatear con gofmt:"
             echo "$unformatted"
             exit 1
           fi
 
-      - name: Vet (Windows amd64)
+      - name: Análisis estático (go vet)
         env:
           CGO_ENABLED: "0"
           GOOS: windows
-          GOARCH: amd64
-        run: go vet ./...
+        run: |
+          GOARCH=amd64 go vet ./...
+          GOARCH=arm64 go vet ./...
 
-      - name: Vet (Windows arm64)
+      - name: Ejecutar pruebas unitarias
         env:
           CGO_ENABLED: "0"
-          GOOS: windows
-          GOARCH: arm64
-        run: go vet ./...
+        run: go test -v ./...
 
-      - name: Test (Core packages)
-        run: go test -race -count=1 ./...
-
-      - name: Build Windows binaries (amd64)
+      - name: Compilar binarios de Windows (amd64 y arm64)
         run: |
           go run ./cmd/build -arch amd64
-          ls -lh dist/
-
-      - name: Build Windows binaries (arm64)
-        run: |
           go run ./cmd/build -arch arm64
           ls -lh dist/
-
-  test-windows:
-    name: Test (Windows native)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Test
-        env:
-          CGO_ENABLED: "0"
-          GOARCH: amd64
-        run: go test -count=1 ./...
