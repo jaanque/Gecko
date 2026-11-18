@@ -14,19 +14,19 @@ import (
 
 	"remote-control/internal/config"
 	"remote-control/internal/protocol"
+	"remote-control/internal/security"
 )
 
 var (
-	procSendMessageW        = user32GUI.NewProc("SendMessageW")
-	procGetWindowTextW      = user32GUI.NewProc("GetWindowTextW")
-	procGetWindowTextLenW   = user32GUI.NewProc("GetWindowTextLengthW")
-	procOpenClipboard       = user32GUI.NewProc("OpenClipboard")
-	procEmptyClipboard      = user32GUI.NewProc("EmptyClipboard")
-	procSetClipboardData    = user32GUI.NewProc("SetClipboardData")
-	procCloseClipboard      = user32GUI.NewProc("CloseClipboard")
-	procGlobalAlloc         = kernel32GUI.NewProc("GlobalAlloc")
-	procGlobalLock          = kernel32GUI.NewProc("GlobalLock")
-	procGlobalUnlock        = kernel32GUI.NewProc("GlobalUnlock")
+	procSendMessageW      = user32GUI.NewProc("SendMessageW")
+	procGetWindowTextW    = user32GUI.NewProc("GetWindowTextW")
+	procGetWindowTextLenW = user32GUI.NewProc("GetWindowTextLengthW")
+	procSetWindowTextW    = user32GUI.NewProc("SetWindowTextW")
+	procOpenClipboard     = user32GUI.NewProc("OpenClipboard")
+	procGetClipboardData  = user32GUI.NewProc("GetClipboardData")
+	procCloseClipboard    = user32GUI.NewProc("CloseClipboard")
+	procGlobalLock        = kernel32GUI.NewProc("GlobalLock")
+	procGlobalUnlock      = kernel32GUI.NewProc("GlobalUnlock")
 )
 
 const (
@@ -49,18 +49,20 @@ const (
 	wsExClientEdge  = 0x00000200
 
 	cfUnicodeText = 13
-	gmemMoveable  = 0x0002
 
 	idCfgAddr    = 2001
 	idCfgTitle   = 2002
 	idCfgPrompt  = 2003
 	idCfgQual    = 2004
 	idCfgTimeout = 2005
+	idSrvAddr    = 2010
+	idSrvKey     = 2011
 )
 
 const (
 	adminTabDevices = 0
 	adminTabBuilder = 1
+	adminTabServer  = 2
 )
 
 // AdminClientRow holds the display data for one online PC in the Admin list.
@@ -87,7 +89,7 @@ type ClientGenParams struct {
 	MuteSound         bool
 }
 
-// AdminCallbacks connects the native desktop Admin GUI to the Hub.
+// AdminCallbacks connects the native desktop Admin GUI to the RelayClient.
 type AdminCallbacks struct {
 	OnConnect        func(clientID string) error
 	OnCancelPending  func()
@@ -98,14 +100,14 @@ type AdminCallbacks struct {
 	OnQuality        func(quality int)
 	OnSelectMonitor  func(monitorIndex int)
 	OnGenerateClient func(params ClientGenParams, destPath string) error
+	OnSaveServer     func(profile security.RelayProfile) error
 	OnClose          func()
 }
 
-// AdminConfig configures static header info for the Admin desktop window.
+// AdminConfig holds initial Relay profile state when launching the Admin window.
 type AdminConfig struct {
-	AgentPort       int
-	SuggestedAddrs  []string // e.g. ["192.168.0.10:9443", "127.0.0.1:9443"]
-	CertFingerprint string
+	HasProfile bool
+	Profile    security.RelayProfile
 }
 
 type adminHitRegion struct {
@@ -124,19 +126,22 @@ type pendingOpenSession struct {
 
 // AdminWindow manages the native Windows desktop Administration UI.
 type AdminWindow struct {
-	cfg       AdminConfig
 	callbacks AdminCallbacks
 
-	mu            sync.Mutex
-	hwnd          uintptr
-	clients       []AdminClientRow
-	pendingHost   string
-	noticeText    string
-	noticeIsError bool
-	openReq       *pendingOpenSession
-	viewer        *remoteViewer
-	readyCh       chan struct{}
-	readyOnce     sync.Once
+	mu             sync.Mutex
+	hwnd           uintptr
+	hasProfile     bool
+	profile        security.RelayProfile
+	relayConnected bool
+	relayStatus    string
+	clients        []AdminClientRow
+	pendingHost    string
+	noticeText     string
+	noticeIsError  bool
+	openReq        *pendingOpenSession
+	viewer         *remoteViewer
+	readyCh        chan struct{}
+	readyOnce      sync.Once
 
 	// UI thread-only state
 	hInst      uintptr
@@ -163,6 +168,10 @@ type AdminWindow struct {
 	ctrlQual    uintptr
 	ctrlTimeout uintptr
 
+	// Native form controls for "Servidor" tab
+	ctrlSrvAddr uintptr
+	ctrlSrvKey  uintptr
+
 	// Client builder toggles & logo state
 	optStartMinimized bool
 	optAllowDisc      bool
@@ -179,21 +188,42 @@ var (
 
 // NewAdminWindow creates a new desktop AdminWindow. Call Run() on the main goroutine.
 func NewAdminWindow(cfg AdminConfig, cb AdminCallbacks) *AdminWindow {
+	startTab := adminTabDevices
+	initStatus := "Conectando..."
+	if !cfg.HasProfile {
+		startTab = adminTabServer
+		initStatus = "Sin servidor"
+	}
 	return &AdminWindow{
-		cfg:          cfg,
-		callbacks:    cb,
-		dpi:          96,
-		activeTab:    adminTabDevices,
-		hoverIdx:     -1,
-		optAllowDisc: true,
+		callbacks:     cb,
+		hasProfile:    cfg.HasProfile,
+		profile:       cfg.Profile,
+		relayStatus:   initStatus,
+		dpi:           96,
+		activeTab:     startTab,
+		hoverIdx:      -1,
+		optAllowDisc:  true,
 		optSoundOnReq: true,
-		readyCh:      make(chan struct{}),
+		readyCh:       make(chan struct{}),
 	}
 }
 
 // Ready is closed once the main Admin window has been created.
 func (a *AdminWindow) Ready() <-chan struct{} {
 	return a.readyCh
+}
+
+// SetRelayStatus updates the live Relay server connection state.
+func (a *AdminWindow) SetRelayStatus(connected bool, detail string) {
+	a.mu.Lock()
+	a.relayConnected = connected
+	a.relayStatus = detail
+	hwnd := a.hwnd
+	a.mu.Unlock()
+
+	if hwnd != 0 {
+		procPostMessageW.Call(hwnd, wmAdminRefresh, 0, 0)
+	}
 }
 
 // UpdateClients updates the online device list from any goroutine.
@@ -250,6 +280,20 @@ func (a *AdminWindow) NotifyDenied(hostname, reason string) {
 	a.mu.Lock()
 	a.pendingHost = ""
 	a.noticeText = fmt.Sprintf("%s: %s", hostname, reason)
+	a.noticeIsError = true
+	hwnd := a.hwnd
+	a.mu.Unlock()
+
+	if hwnd != 0 {
+		procPostMessageW.Call(hwnd, wmAdminRefresh, 0, 0)
+	}
+}
+
+// NotifyError shows an error notice in the Admin window.
+func (a *AdminWindow) NotifyError(reason string) {
+	a.mu.Lock()
+	a.pendingHost = ""
+	a.noticeText = reason
 	a.noticeIsError = true
 	hwnd := a.hwnd
 	a.mu.Unlock()
@@ -372,8 +416,8 @@ func (a *AdminWindow) Run() error {
 	}
 	procSetWindowPos.Call(hwnd, 0, uintptr(posX), uintptr(posY), uintptr(winW), uintptr(winH), 0)
 
-	a.createBuilderControls(hwnd)
-	a.syncBuilderControls(hwnd)
+	a.createFormControls(hwnd)
+	a.syncFormControls(hwnd)
 
 	a.mu.Lock()
 	a.hwnd = hwnd
@@ -420,34 +464,30 @@ func (a *AdminWindow) destroyFonts() {
 	}
 }
 
-func (a *AdminWindow) primaryServerAddr() string {
-	if len(a.cfg.SuggestedAddrs) > 0 {
-		return a.cfg.SuggestedAddrs[0]
-	}
-	return fmt.Sprintf("127.0.0.1:%d", a.cfg.AgentPort)
-}
-
-func (a *AdminWindow) createBuilderControls(parent uintptr) {
+func (a *AdminWindow) createFormControls(parent uintptr) {
 	comboClass, _ := syscall.UTF16PtrFromString("COMBOBOX")
 	editClass, _ := syscall.UTF16PtrFromString("EDIT")
 
-	// 1. Server address combobox (editable)
+	a.mu.Lock()
+	initAddr := a.profile.ServerAddr
+	initKey := ""
+	if a.hasProfile {
+		if k, err := security.EncodeProfileKey(a.profile); err == nil {
+			initKey = k
+		}
+	}
+	a.mu.Unlock()
+
+	// --- "Crear cliente" controls ---
+	addrU16, _ := syscall.UTF16PtrFromString(initAddr)
 	a.ctrlAddr, _, _ = procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(comboClass)), 0,
-		wsChild|wsTabStop|wsVScroll|cbsDropdown|cbsAutoHScroll,
-		0, 0, 200, uintptr(a.scale(150)),
+		wsExClientEdge, uintptr(unsafe.Pointer(editClass)), uintptr(unsafe.Pointer(addrU16)),
+		wsChild|wsTabStop|wsBorder|esAutoHScroll,
+		0, 0, 200, uintptr(a.scale(26)),
 		parent, idCfgAddr, a.hInst, 0,
 	)
 	procSendMessageW.Call(a.ctrlAddr, wmSetFont, a.fontMono, 1)
-	for _, addr := range a.cfg.SuggestedAddrs {
-		u16, _ := syscall.UTF16PtrFromString(addr)
-		procSendMessageW.Call(a.ctrlAddr, cbAddString, 0, uintptr(unsafe.Pointer(u16)))
-	}
-	if len(a.cfg.SuggestedAddrs) > 0 {
-		procSendMessageW.Call(a.ctrlAddr, cbSetCurSel, 0, 0)
-	}
 
-	// 2. Client window title edit
 	defTitle, _ := syscall.UTF16PtrFromString("Cliente Remoto")
 	a.ctrlTitle, _, _ = procCreateWindowExW.Call(
 		wsExClientEdge, uintptr(unsafe.Pointer(editClass)), uintptr(unsafe.Pointer(defTitle)),
@@ -457,7 +497,6 @@ func (a *AdminWindow) createBuilderControls(parent uintptr) {
 	)
 	procSendMessageW.Call(a.ctrlTitle, wmSetFont, a.fontBody, 1)
 
-	// 3. Prompt message edit
 	defPrompt, _ := syscall.UTF16PtrFromString("El administrador solicita controlar este equipo.")
 	a.ctrlPrompt, _, _ = procCreateWindowExW.Call(
 		wsExClientEdge, uintptr(unsafe.Pointer(editClass)), uintptr(unsafe.Pointer(defPrompt)),
@@ -467,7 +506,6 @@ func (a *AdminWindow) createBuilderControls(parent uintptr) {
 	)
 	procSendMessageW.Call(a.ctrlPrompt, wmSetFont, a.fontBody, 1)
 
-	// 4. Default video quality combobox (fixed list)
 	a.ctrlQual, _, _ = procCreateWindowExW.Call(
 		0, uintptr(unsafe.Pointer(comboClass)), 0,
 		wsChild|wsTabStop|wsVScroll|cbsDropdownList,
@@ -481,7 +519,6 @@ func (a *AdminWindow) createBuilderControls(parent uintptr) {
 	}
 	procSendMessageW.Call(a.ctrlQual, cbSetCurSel, 0, 0)
 
-	// 5. Consent timeout combobox (editable seconds)
 	a.ctrlTimeout, _, _ = procCreateWindowExW.Call(
 		0, uintptr(unsafe.Pointer(comboClass)), 0,
 		wsChild|wsTabStop|wsVScroll|cbsDropdown|cbsAutoHScroll,
@@ -493,22 +530,42 @@ func (a *AdminWindow) createBuilderControls(parent uintptr) {
 		u16, _ := syscall.UTF16PtrFromString(sec)
 		procSendMessageW.Call(a.ctrlTimeout, cbAddString, 0, uintptr(unsafe.Pointer(u16)))
 	}
-	procSendMessageW.Call(a.ctrlTimeout, cbSetCurSel, 1, 0) // 60s
+	procSendMessageW.Call(a.ctrlTimeout, cbSetCurSel, 1, 0)
+
+	// --- "Servidor" controls ---
+	srvAddrU16, _ := syscall.UTF16PtrFromString(initAddr)
+	a.ctrlSrvAddr, _, _ = procCreateWindowExW.Call(
+		wsExClientEdge, uintptr(unsafe.Pointer(editClass)), uintptr(unsafe.Pointer(srvAddrU16)),
+		wsChild|wsTabStop|wsBorder|esAutoHScroll,
+		0, 0, 400, uintptr(a.scale(28)),
+		parent, idSrvAddr, a.hInst, 0,
+	)
+	procSendMessageW.Call(a.ctrlSrvAddr, wmSetFont, a.fontMono, 1)
+
+	srvKeyU16, _ := syscall.UTF16PtrFromString(initKey)
+	a.ctrlSrvKey, _, _ = procCreateWindowExW.Call(
+		wsExClientEdge, uintptr(unsafe.Pointer(editClass)), uintptr(unsafe.Pointer(srvKeyU16)),
+		wsChild|wsTabStop|wsBorder|esAutoHScroll,
+		0, 0, 400, uintptr(a.scale(28)),
+		parent, idSrvKey, a.hInst, 0,
+	)
+	procSendMessageW.Call(a.ctrlSrvKey, wmSetFont, a.fontMono, 1)
 }
 
-func (a *AdminWindow) builderCardMetrics(cw, ch int32) (cardRC rect, colL, colR, colW int32, row1Y, row2Y, row3Y, row4Y, row5Y int32) {
-	barH := a.scale(54)
-	pad := a.scale(20)
-	top := barH + a.scale(16)
-
+func (a *AdminWindow) contentTopY() int32 {
+	top := a.scale(54) + a.scale(16)
 	a.mu.Lock()
 	hasBanner := a.pendingHost != "" || a.noticeText != ""
 	a.mu.Unlock()
 	if hasBanner {
 		top += a.scale(56)
 	}
+	return top
+}
 
-	cardRC = rect{pad, top, cw - pad, ch - pad}
+func (a *AdminWindow) builderCardMetrics(cw, ch int32) (cardRC rect, colL, colR, colW int32, row1Y, row2Y, row3Y, row4Y, row5Y int32) {
+	pad := a.scale(20)
+	cardRC = rect{pad, a.contentTopY(), cw - pad, ch - pad}
 	innerPad := a.scale(22)
 	gap := a.scale(18)
 	innerW := (cardRC.Right - cardRC.Left) - innerPad*2
@@ -524,41 +581,69 @@ func (a *AdminWindow) builderCardMetrics(cw, ch int32) (cardRC rect, colL, colR,
 	return
 }
 
-func (a *AdminWindow) syncBuilderControls(hwnd uintptr) {
+func (a *AdminWindow) serverCardMetrics(cw, ch int32) (cardRC rect, innerL, innerW int32, addrY, keyY int32) {
+	pad := a.scale(20)
+	cardRC = rect{pad, a.contentTopY(), cw - pad, ch - pad}
+	innerPad := a.scale(24)
+	innerL = cardRC.Left + innerPad
+	innerW = (cardRC.Right - cardRC.Left) - innerPad*2
+	addrY = cardRC.Top + a.scale(86)
+	keyY = addrY + a.scale(72)
+	return
+}
+
+func (a *AdminWindow) syncFormControls(hwnd uintptr) {
 	if a.ctrlAddr == 0 {
 		return
 	}
-	ctrls := []uintptr{a.ctrlAddr, a.ctrlTitle, a.ctrlPrompt, a.ctrlQual, a.ctrlTimeout}
-	if a.activeTab != adminTabBuilder {
-		for _, c := range ctrls {
-			procShowWindow.Call(c, swHide)
-		}
-		return
-	}
+	builderCtrls := []uintptr{a.ctrlAddr, a.ctrlTitle, a.ctrlPrompt, a.ctrlQual, a.ctrlTimeout}
+	serverCtrls := []uintptr{a.ctrlSrvAddr, a.ctrlSrvKey}
 
 	var cr rect
 	procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&cr)))
 	cw := cr.Right - cr.Left
 	ch := cr.Bottom - cr.Top
-	if cw <= 0 || ch <= 0 {
-		return
+
+	if a.activeTab == adminTabBuilder && cw > 0 && ch > 0 {
+		cardRC, colL, colR, colW, row1Y, row2Y, row3Y, _, _ := a.builderCardMetrics(cw, ch)
+		innerPad := a.scale(22)
+		fullW := (cardRC.Right - cardRC.Left) - innerPad*2
+		lblH := a.scale(20)
+		editH := a.scale(26)
+		comboDropH := a.scale(150)
+
+		procSetWindowPos.Call(a.ctrlAddr, 0, uintptr(colL), uintptr(row1Y+lblH), uintptr(colW), uintptr(editH), 0)
+		procSetWindowPos.Call(a.ctrlTitle, 0, uintptr(colR), uintptr(row1Y+lblH), uintptr(colW), uintptr(editH), 0)
+		procSetWindowPos.Call(a.ctrlPrompt, 0, uintptr(colL), uintptr(row2Y+lblH), uintptr(fullW), uintptr(editH), 0)
+		procSetWindowPos.Call(a.ctrlQual, 0, uintptr(colL), uintptr(row3Y+lblH), uintptr(colW), uintptr(comboDropH), 0)
+		procSetWindowPos.Call(a.ctrlTimeout, 0, uintptr(colR), uintptr(row3Y+lblH), uintptr(colW), uintptr(comboDropH), 0)
+
+		for _, c := range builderCtrls {
+			procShowWindow.Call(c, swShowNormal)
+		}
+	} else {
+		for _, c := range builderCtrls {
+			procShowWindow.Call(c, swHide)
+		}
 	}
 
-	cardRC, colL, colR, colW, row1Y, row2Y, row3Y, _, _ := a.builderCardMetrics(cw, ch)
-	innerPad := a.scale(22)
-	fullW := (cardRC.Right - cardRC.Left) - innerPad*2
-	lblH := a.scale(20)
-	editH := a.scale(26)
-	comboDropH := a.scale(150)
+	if a.activeTab == adminTabServer && cw > 0 && ch > 0 {
+		_, innerL, innerW, addrY, keyY := a.serverCardMetrics(cw, ch)
+		lblH := a.scale(22)
+		editH := a.scale(28)
+		pasteW := a.scale(108)
+		gap := a.scale(8)
 
-	procSetWindowPos.Call(a.ctrlAddr, 0, uintptr(colL), uintptr(row1Y+lblH), uintptr(colW), uintptr(comboDropH), 0)
-	procSetWindowPos.Call(a.ctrlTitle, 0, uintptr(colR), uintptr(row1Y+lblH), uintptr(colW), uintptr(editH), 0)
-	procSetWindowPos.Call(a.ctrlPrompt, 0, uintptr(colL), uintptr(row2Y+lblH), uintptr(fullW), uintptr(editH), 0)
-	procSetWindowPos.Call(a.ctrlQual, 0, uintptr(colL), uintptr(row3Y+lblH), uintptr(colW), uintptr(comboDropH), 0)
-	procSetWindowPos.Call(a.ctrlTimeout, 0, uintptr(colR), uintptr(row3Y+lblH), uintptr(colW), uintptr(comboDropH), 0)
+		procSetWindowPos.Call(a.ctrlSrvAddr, 0, uintptr(innerL), uintptr(addrY+lblH), uintptr(innerW), uintptr(editH), 0)
+		procSetWindowPos.Call(a.ctrlSrvKey, 0, uintptr(innerL), uintptr(keyY+lblH), uintptr(innerW-pasteW-gap), uintptr(editH), 0)
 
-	for _, c := range ctrls {
-		procShowWindow.Call(c, swShowNormal)
+		for _, c := range serverCtrls {
+			procShowWindow.Call(c, swShowNormal)
+		}
+	} else {
+		for _, c := range serverCtrls {
+			procShowWindow.Call(c, swHide)
+		}
 	}
 }
 
@@ -568,7 +653,7 @@ func (a *AdminWindow) switchTab(hwnd uintptr, tab int) {
 	}
 	a.activeTab = tab
 	a.hoverIdx = -1
-	a.syncBuilderControls(hwnd)
+	a.syncFormControls(hwnd)
 	procInvalidateRect.Call(hwnd, 0, 0)
 }
 
@@ -606,6 +691,10 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 	pendingHost := a.pendingHost
 	noticeText := a.noticeText
 	noticeIsErr := a.noticeIsError
+	relayOK := a.relayConnected
+	relayDetail := a.relayStatus
+	hasProfile := a.hasProfile
+	profile := a.profile
 	a.mu.Unlock()
 
 	// Neutral light canvas (#F6F7F9)
@@ -619,47 +708,63 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 
 	oldFont, _, _ := procSelectObject.Call(memDC, a.fontBrand)
 	procSetTextColor.Call(memDC, rgb(24, 24, 27))
-	brandRC := rect{pad, 0, pad + a.scale(136), barH}
+	brandRC := rect{pad, 0, pad + a.scale(132), barH}
 	drawText(memDC, "Control Remoto", &brandRC, dtLeft|dtSingleLn|dtVCenter)
 
-	// Subtle divider between brand and top menu tabs
 	divX := brandRC.Right + a.scale(8)
 	drawLine(memDC, divX, a.scale(15), divX, barH-a.scale(15), rgb(228, 228, 231))
 
-	// Top menu tabs: "Equipos (N)" | "Crear cliente"
+	// Top menu tabs: "Equipos (N)" | "Crear cliente" | "Servidor"
 	tabY := a.scale(11)
 	tabH := barH - a.scale(22)
-	tab1X := divX + a.scale(14)
-	tab1W := a.scale(116)
-	tab1RC := rect{tab1X, tabY, tab1X + tab1W, tabY + tabH}
+	tx := divX + a.scale(12)
+
+	tab1RC := rect{tx, tabY, tx + a.scale(108), tabY + tabH}
 	tab1Idx := len(a.hits)
 	a.hits = append(a.hits, adminHitRegion{kind: "tab_devices", rc: tab1RC})
+	tx = tab1RC.Right + a.scale(6)
 
-	tab2X := tab1RC.Right + a.scale(6)
-	tab2W := a.scale(112)
-	tab2RC := rect{tab2X, tabY, tab2X + tab2W, tabY + tabH}
+	tab2RC := rect{tx, tabY, tx + a.scale(108), tabY + tabH}
 	tab2Idx := len(a.hits)
 	a.hits = append(a.hits, adminHitRegion{kind: "tab_builder", rc: tab2RC})
+	tx = tab2RC.Right + a.scale(6)
+
+	tab3RC := rect{tx, tabY, tx + a.scale(86), tabY + tabH}
+	tab3Idx := len(a.hits)
+	a.hits = append(a.hits, adminHitRegion{kind: "tab_server", rc: tab3RC})
 
 	procSelectObject.Call(memDC, a.fontBtn)
 	a.drawTopMenuTab(memDC, tab1RC, fmt.Sprintf("Equipos (%d)", len(clients)), a.activeTab == adminTabDevices, a.hoverIdx == tab1Idx)
 	a.drawTopMenuTab(memDC, tab2RC, "Crear cliente", a.activeTab == adminTabBuilder, a.hoverIdx == tab2Idx)
+	a.drawTopMenuTab(memDC, tab3RC, "Servidor", a.activeTab == adminTabServer, a.hoverIdx == tab3Idx)
 
-	// Right side: clickable server address pill (copy to clipboard)
-	addr := a.primaryServerAddr()
-	addrW := a.scale(168)
-	addrH := a.scale(28)
-	if cw-pad-addrW > tab2RC.Right+a.scale(12) {
-		addrRC := rect{cw - pad - addrW, (barH - addrH) / 2, cw - pad, (barH + addrH) / 2}
-		addrIdx := len(a.hits)
-		a.hits = append(a.hits, adminHitRegion{kind: "copy_addr", rc: addrRC})
+	// Far right: live Relay status pill (clicking opens Servidor tab)
+	pillW := a.scale(156)
+	pillH := a.scale(28)
+	if cw-pad-pillW > tab3RC.Right+a.scale(12) {
+		pillRC := rect{cw - pad - pillW, (barH - pillH) / 2, cw - pad, (barH + pillH) / 2}
+		pillIdx := len(a.hits)
+		a.hits = append(a.hits, adminHitRegion{kind: "tab_server", rc: pillRC})
 
 		pillBg := rgb(246, 247, 249)
-		if a.hoverIdx == addrIdx {
+		if a.hoverIdx == pillIdx {
 			pillBg = rgb(238, 240, 243)
 		}
-		procSelectObject.Call(memDC, a.fontMono)
-		drawFlatButton(memDC, addrRC, a.scale(6), pillBg, rgb(228, 228, 231), rgb(82, 82, 91), addr)
+		drawRoundedCard(memDC, pillRC, a.scale(6), pillBg, rgb(228, 228, 231))
+		dotCol := rgb(217, 119, 6)
+		statusTxt := "Conectando..."
+		if !hasProfile {
+			dotCol = rgb(161, 161, 170)
+			statusTxt = "Sin servidor"
+		} else if relayOK {
+			dotCol = rgb(22, 163, 74)
+			statusTxt = "Puente en línea"
+		}
+		drawStatusDot(memDC, pillRC.Left+a.scale(10), pillRC.Top+(pillH-a.scale(8))/2, a.scale(8), dotCol)
+		procSelectObject.Call(memDC, a.fontSmall)
+		procSetTextColor.Call(memDC, rgb(63, 63, 70))
+		pTxt := rect{pillRC.Left + a.scale(24), pillRC.Top, pillRC.Right - a.scale(8), pillRC.Bottom}
+		drawText(memDC, statusTxt, &pTxt, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 	}
 
 	// 2. Optional banner (pending request or notice)
@@ -716,10 +821,13 @@ func (a *AdminWindow) paint(hwnd uintptr) {
 	}
 
 	// 3. Active tab content
-	if a.activeTab == adminTabDevices {
-		a.paintDevicesTab(memDC, cw, ch, pad, curY, clients)
-	} else {
-		a.paintBuilderTab(memDC, cw, ch)
+	switch a.activeTab {
+	case adminTabDevices:
+		a.paintDevicesTab(memDC, cw, ch, pad, curY, clients, hasProfile, relayOK, relayDetail)
+	case adminTabBuilder:
+		a.paintBuilderTab(memDC, cw, ch, hasProfile, profile)
+	case adminTabServer:
+		a.paintServerTab(memDC, cw, ch, hasProfile, relayOK, relayDetail, profile)
 	}
 
 	procSelectObject.Call(memDC, oldFont)
@@ -738,7 +846,7 @@ func (a *AdminWindow) drawTopMenuTab(hdc uintptr, rc rect, label string, active,
 	drawFlatButton(hdc, rc, a.scale(6), bg, bg, rgb(63, 63, 70), label)
 }
 
-func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, clients []AdminClientRow) {
+func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, clients []AdminClientRow, hasProfile, relayOK bool, relayDetail string) {
 	cardRC := rect{pad, topY, cw - pad, ch - pad}
 	if cardRC.Bottom-cardRC.Top < a.scale(140) {
 		cardRC.Bottom = cardRC.Top + a.scale(140)
@@ -754,28 +862,45 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		a.scrollY = 0
 		midY := listTop + listH/2
 
+		title := "No hay equipos conectados"
+		desc := "Crea ClienteRemoto.exe y ejecútalo en cualquier PC (incluso en otra red)."
+		ctaLabel := "Crear cliente (.exe)"
+		ctaKind := "tab_builder"
+
+		if !hasProfile {
+			title = "Configura tu servidor puente"
+			desc = "Introduce la dirección y clave de tu RelayServidor para conectar desde cualquier red."
+			ctaLabel = "Configurar servidor"
+			ctaKind = "tab_server"
+		} else if !relayOK {
+			title = "Sin conexión con el servidor puente"
+			desc = relayDetail
+			ctaLabel = "Revisar servidor"
+			ctaKind = "tab_server"
+		}
+
 		procSelectObject.Call(memDC, a.fontTitle)
 		procSetTextColor.Call(memDC, rgb(24, 24, 27))
 		tRC := rect{cardRC.Left + a.scale(24), midY - a.scale(44), cardRC.Right - a.scale(24), midY - a.scale(20)}
-		drawText(memDC, "No hay equipos conectados", &tRC, dtCenter|dtSingleLn|dtVCenter)
+		drawText(memDC, title, &tRC, dtCenter|dtSingleLn|dtVCenter)
 
 		procSelectObject.Call(memDC, a.fontBody)
 		procSetTextColor.Call(memDC, rgb(113, 113, 122))
 		dRC := rect{cardRC.Left + a.scale(24), midY - a.scale(16), cardRC.Right - a.scale(24), midY + a.scale(6)}
-		drawText(memDC, "Crea ClienteRemoto.exe y ejecútalo en los PCs que quieras controlar.", &dRC, dtCenter|dtSingleLn|dtVCenter|dtEndEllip)
+		drawText(memDC, desc, &dRC, dtCenter|dtSingleLn|dtVCenter|dtEndEllip)
 
-		ctaW := a.scale(186)
+		ctaW := a.scale(190)
 		ctaH := a.scale(34)
 		ctaX := cardRC.Left + (cardRC.Right-cardRC.Left-ctaW)/2
 		ctaRC := rect{ctaX, midY + a.scale(18), ctaX + ctaW, midY + a.scale(18) + ctaH}
 		ctaIdx := len(a.hits)
-		a.hits = append(a.hits, adminHitRegion{kind: "tab_builder", rc: ctaRC})
+		a.hits = append(a.hits, adminHitRegion{kind: ctaKind, rc: ctaRC})
 		ctaBg := rgb(24, 24, 27)
 		if a.hoverIdx == ctaIdx {
 			ctaBg = rgb(39, 39, 42)
 		}
 		procSelectObject.Call(memDC, a.fontBtn)
-		drawFlatButton(memDC, ctaRC, a.scale(6), ctaBg, ctaBg, rgb(255, 255, 255), "Crear cliente (.exe)")
+		drawFlatButton(memDC, ctaRC, a.scale(6), ctaBg, ctaBg, rgb(255, 255, 255), ctaLabel)
 		return
 	}
 
@@ -883,7 +1008,7 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 	}
 }
 
-func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch int32) {
+func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch int32, hasProfile bool, profile security.RelayProfile) {
 	cardRC, colL, colR, colW, row1Y, row2Y, row3Y, row4Y, row5Y := a.builderCardMetrics(cw, ch)
 	drawRoundedCard(memDC, cardRC, a.scale(8), rgb(255, 255, 255), rgb(228, 228, 231))
 
@@ -891,9 +1016,8 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch int32) {
 	procSelectObject.Call(memDC, a.fontBtn)
 	procSetTextColor.Call(memDC, rgb(24, 24, 27))
 
-	// Labels for the 5 native form fields
 	l1 := rect{colL, row1Y, colL + colW, row1Y + lblH}
-	drawText(memDC, "Dirección del servidor (IP:Puerto)", &l1, dtLeft|dtSingleLn|dtVCenter)
+	drawText(memDC, "Servidor puente (dominio:puerto)", &l1, dtLeft|dtSingleLn|dtVCenter)
 
 	l2 := rect{colR, row1Y, colR + colW, row1Y + lblH}
 	drawText(memDC, "Título de la ventana cliente", &l2, dtLeft|dtSingleLn|dtVCenter)
@@ -907,13 +1031,11 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch int32) {
 	l5 := rect{colR, row3Y, colR + colW, row3Y + lblH}
 	drawText(memDC, "Tiempo de espera de solicitud (seg)", &l5, dtLeft|dtSingleLn|dtVCenter)
 
-	// Row 4: Custom crisp checkboxes (2x2 grid)
 	chkH := a.scale(28)
 	a.drawCheckbox(memDC, rect{colL, row4Y, colL + colW, row4Y + chkH}, "opt_minimized", "Iniciar minimizado en la barra de tareas", a.optStartMinimized)
 	a.drawCheckbox(memDC, rect{colR, row4Y, colR + colW, row4Y + chkH}, "opt_sound", "Sonido al recibir solicitud de control", a.optSoundOnReq)
 	a.drawCheckbox(memDC, rect{colL, row4Y + a.scale(34), cardRC.Right - a.scale(22), row4Y + a.scale(34) + chkH}, "opt_allow_disc", "Mostrar botón Desconectar en el cliente durante la sesión", a.optAllowDisc)
 
-	// Row 5: Logo selector with live alpha-blended preview
 	drawLine(memDC, colL, row5Y-a.scale(10), cardRC.Right-a.scale(22), row5Y-a.scale(10), rgb(244, 244, 245))
 
 	boxSz := a.scale(42)
@@ -970,7 +1092,6 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch int32) {
 	lt2 := rect{logoTxtLeft, row5Y + a.scale(22), logoTxtRight, row5Y + a.scale(40)}
 	drawText(memDC, logoSub, &lt2, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-	// Footer inside card: TLS info + Save button
 	footerH := a.scale(58)
 	footerTop := cardRC.Bottom - footerH
 	if footerTop < row5Y+boxSz+a.scale(12) {
@@ -985,8 +1106,12 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch int32) {
 	a.hits = append(a.hits, adminHitRegion{kind: "save_client", rc: saveRC})
 
 	procSelectObject.Call(memDC, a.fontSmall)
-	procSetTextColor.Call(memDC, rgb(113, 113, 122))
-	footTxt := fmt.Sprintf("TLS 1.3 · %s · Mismo .exe para todos los equipos", a.cfg.CertFingerprint)
+	footTxt := "Configura primero el servidor puente en la pestaña Servidor."
+	procSetTextColor.Call(memDC, rgb(185, 28, 28))
+	if hasProfile {
+		procSetTextColor.Call(memDC, rgb(113, 113, 122))
+		footTxt = fmt.Sprintf("TLS 1.3 · %s · Mismo .exe para todos los equipos", security.ShortFingerprint(profile.CertSHA256))
+	}
 	fRC := rect{colL, footerTop, saveRC.Left - a.scale(12), footerTop + footerH}
 	drawText(memDC, footTxt, &fRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
@@ -996,6 +1121,99 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch int32) {
 	}
 	procSelectObject.Call(memDC, a.fontBtn)
 	drawFlatButton(memDC, saveRC, a.scale(6), saveBg, saveBg, rgb(255, 255, 255), "Guardar ClienteRemoto.exe...")
+}
+
+func (a *AdminWindow) paintServerTab(memDC uintptr, cw, ch int32, hasProfile, relayOK bool, relayDetail string, profile security.RelayProfile) {
+	cardRC, innerL, innerW, addrY, keyY := a.serverCardMetrics(cw, ch)
+	drawRoundedCard(memDC, cardRC, a.scale(8), rgb(255, 255, 255), rgb(228, 228, 231))
+	rightEdge := innerL + innerW
+
+	// Header inside card
+	procSelectObject.Call(memDC, a.fontTitle)
+	procSetTextColor.Call(memDC, rgb(24, 24, 27))
+	hRC := rect{innerL, cardRC.Top + a.scale(20), rightEdge, cardRC.Top + a.scale(44)}
+	drawText(memDC, "Servidor puente (Relay)", &hRC, dtLeft|dtSingleLn|dtVCenter)
+
+	procSelectObject.Call(memDC, a.fontBody)
+	procSetTextColor.Call(memDC, rgb(113, 113, 122))
+	dRC := rect{innerL, cardRC.Top + a.scale(44), rightEdge, cardRC.Top + a.scale(68)}
+	drawText(memDC, "Ejecuta RelayServidor en tu VPS o servidor y pega aquí su dirección y clave RMT1.", &dRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+
+	// Field 1 label: Server address
+	procSelectObject.Call(memDC, a.fontBtn)
+	procSetTextColor.Call(memDC, rgb(24, 24, 27))
+	l1 := rect{innerL, addrY, rightEdge, addrY + a.scale(20)}
+	drawText(memDC, "Dirección del servidor (ej. remoto.tudominio.com:9443)", &l1, dtLeft|dtSingleLn|dtVCenter)
+
+	// Field 2 label: Server key + Paste button
+	l2 := rect{innerL, keyY, rightEdge, keyY + a.scale(20)}
+	drawText(memDC, "Clave del servidor (RMT1:...)", &l2, dtLeft|dtSingleLn|dtVCenter)
+
+	pasteW := a.scale(108)
+	pasteH := a.scale(28)
+	pasteRC := rect{rightEdge - pasteW, keyY + a.scale(22), rightEdge, keyY + a.scale(22) + pasteH}
+	pasteIdx := len(a.hits)
+	a.hits = append(a.hits, adminHitRegion{kind: "paste_key", rc: pasteRC})
+	pasteBg := rgb(255, 255, 255)
+	if a.hoverIdx == pasteIdx {
+		pasteBg = rgb(244, 244, 245)
+	}
+	drawFlatButton(memDC, pasteRC, a.scale(5), pasteBg, rgb(212, 212, 216), rgb(24, 24, 27), "Pegar clave")
+
+	// Live connection status box
+	stTop := keyY + a.scale(68)
+	stH := a.scale(52)
+	stRC := rect{innerL, stTop, rightEdge, stTop + stH}
+	drawRoundedCard(memDC, stRC, a.scale(6), rgb(249, 250, 251), rgb(228, 228, 231))
+
+	dotCol := rgb(161, 161, 170)
+	stLine1 := "Sin configurar"
+	stLine2 := "Inicia RelayServidor en tu servidor para obtener la clave RMT1."
+	if hasProfile {
+		if relayOK {
+			dotCol = rgb(22, 163, 74)
+			stLine1 = "Conectado a " + profile.ServerAddr
+		} else {
+			dotCol = rgb(217, 119, 6)
+			stLine1 = relayDetail
+		}
+		stLine2 = "Certificado TLS 1.3 fijado: " + security.ShortFingerprint(profile.CertSHA256)
+	}
+	drawStatusDot(memDC, stRC.Left+a.scale(14), stRC.Top+(stH-a.scale(9))/2, a.scale(9), dotCol)
+	procSelectObject.Call(memDC, a.fontBtn)
+	procSetTextColor.Call(memDC, rgb(24, 24, 27))
+	s1RC := rect{stRC.Left + a.scale(32), stRC.Top + a.scale(7), stRC.Right - a.scale(12), stRC.Top + a.scale(26)}
+	drawText(memDC, stLine1, &s1RC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+	procSelectObject.Call(memDC, a.fontMono)
+	procSetTextColor.Call(memDC, rgb(113, 113, 122))
+	s2RC := rect{stRC.Left + a.scale(32), stRC.Top + a.scale(27), stRC.Right - a.scale(12), stRC.Top + a.scale(45)}
+	drawText(memDC, stLine2, &s2RC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+
+	// Footer with Save & Connect button
+	footerH := a.scale(58)
+	footerTop := cardRC.Bottom - footerH
+	if footerTop < stRC.Bottom+a.scale(14) {
+		footerTop = stRC.Bottom + a.scale(14)
+	}
+	drawLine(memDC, cardRC.Left+1, footerTop, cardRC.Right-1, footerTop, rgb(228, 228, 231))
+
+	saveW := a.scale(180)
+	saveH := a.scale(36)
+	saveRC := rect{rightEdge - saveW, footerTop + (footerH-saveH)/2, rightEdge, footerTop + (footerH+saveH)/2}
+	saveIdx := len(a.hits)
+	a.hits = append(a.hits, adminHitRegion{kind: "save_server", rc: saveRC})
+
+	procSelectObject.Call(memDC, a.fontSmall)
+	procSetTextColor.Call(memDC, rgb(113, 113, 122))
+	fRC := rect{innerL, footerTop, saveRC.Left - a.scale(12), footerTop + footerH}
+	drawText(memDC, "La configuración se guarda en ./data/admin_profile.json", &fRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+
+	saveBg := rgb(24, 24, 27)
+	if a.hoverIdx == saveIdx {
+		saveBg = rgb(39, 39, 42)
+	}
+	procSelectObject.Call(memDC, a.fontBtn)
+	drawFlatButton(memDC, saveRC, a.scale(6), saveBg, saveBg, rgb(255, 255, 255), "Guardar y conectar")
 }
 
 func (a *AdminWindow) drawCheckbox(hdc uintptr, rc rect, kind, label string, checked bool) {
@@ -1044,16 +1262,23 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 	case "tab_builder":
 		a.switchTab(hwnd, adminTabBuilder)
 
-	case "copy_addr":
-		addr := a.primaryServerAddr()
-		if copyTextToClipboard(hwnd, addr) {
-			a.mu.Lock()
-			a.noticeText = "Dirección copiada: " + addr
-			a.noticeIsError = false
-			a.mu.Unlock()
-			a.syncBuilderControls(hwnd)
-			procInvalidateRect.Call(hwnd, 0, 0)
+	case "tab_server":
+		a.switchTab(hwnd, adminTabServer)
+
+	case "paste_key":
+		if clip := readTextFromClipboard(hwnd); clip != "" {
+			clip = strings.TrimSpace(clip)
+			setControlText(a.ctrlSrvKey, clip)
+			// If the pasted RMT1 key already embeds a public server address, fill it automatically.
+			if prof, err := security.DecodeProfileKey(clip); err == nil && prof.ServerAddr != "" {
+				if strings.TrimSpace(getControlText(a.ctrlSrvAddr)) == "" {
+					setControlText(a.ctrlSrvAddr, prof.ServerAddr)
+				}
+			}
 		}
+
+	case "save_server":
+		a.handleSaveServer(hwnd)
 
 	case "opt_minimized":
 		a.optStartMinimized = !a.optStartMinimized
@@ -1089,14 +1314,14 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 		if a.callbacks.OnCancelPending != nil {
 			go a.callbacks.OnCancelPending()
 		}
-		a.syncBuilderControls(hwnd)
+		a.syncFormControls(hwnd)
 		procInvalidateRect.Call(hwnd, 0, 0)
 
 	case "close_notice":
 		a.mu.Lock()
 		a.noticeText = ""
 		a.mu.Unlock()
-		a.syncBuilderControls(hwnd)
+		a.syncFormControls(hwnd)
 		procInvalidateRect.Call(hwnd, 0, 0)
 
 	case "row":
@@ -1104,15 +1329,50 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 		if a.callbacks.OnConnect != nil {
 			go func() {
 				if err := a.callbacks.OnConnect(cid); err != nil {
-					a.mu.Lock()
-					a.noticeText = err.Error()
-					a.noticeIsError = true
-					a.mu.Unlock()
-					procPostMessageW.Call(hwnd, wmAdminRefresh, 0, 0)
+					a.NotifyError(err.Error())
 				}
 			}()
 		}
 	}
+}
+
+func (a *AdminWindow) handleSaveServer(hwnd uintptr) {
+	keyStr := strings.TrimSpace(getControlText(a.ctrlSrvKey))
+	prof, err := security.DecodeProfileKey(keyStr)
+	if err != nil {
+		ShowMessageBox(hwnd, "Clave de servidor inválida", err.Error(), true)
+		return
+	}
+
+	addr := strings.TrimSpace(getControlText(a.ctrlSrvAddr))
+	if addr != "" {
+		prof.ServerAddr = addr
+	}
+	if prof.ServerAddr == "" {
+		ShowMessageBox(hwnd, "Dirección requerida", "Introduce la dirección pública de tu servidor puente (ej. remoto.tudominio.com:9443).", true)
+		return
+	}
+	if !strings.Contains(prof.ServerAddr, ":") {
+		prof.ServerAddr += ":9443"
+	}
+
+	if a.callbacks.OnSaveServer != nil {
+		if err := a.callbacks.OnSaveServer(prof); err != nil {
+			ShowMessageBox(hwnd, "Error guardando servidor", err.Error(), true)
+			return
+		}
+	}
+
+	a.mu.Lock()
+	a.profile = prof
+	a.hasProfile = true
+	a.noticeText = "Servidor puente configurado: " + prof.ServerAddr
+	a.noticeIsError = false
+	a.mu.Unlock()
+
+	setControlText(a.ctrlSrvAddr, prof.ServerAddr)
+	setControlText(a.ctrlAddr, prof.ServerAddr)
+	a.switchTab(hwnd, adminTabDevices)
 }
 
 func (a *AdminWindow) handlePickLogo(hwnd uintptr) {
@@ -1135,9 +1395,18 @@ func (a *AdminWindow) handlePickLogo(hwnd uintptr) {
 }
 
 func (a *AdminWindow) handleSaveClient(hwnd uintptr) {
+	a.mu.Lock()
+	hasProf := a.hasProfile
+	a.mu.Unlock()
+	if !hasProf {
+		ShowMessageBox(hwnd, "Servidor no configurado", "Configura primero el servidor puente en la pestaña Servidor.", true)
+		a.switchTab(hwnd, adminTabServer)
+		return
+	}
+
 	addr := strings.TrimSpace(getControlText(a.ctrlAddr))
 	if addr == "" {
-		ShowMessageBox(hwnd, "Dirección requerida", "Introduce la dirección IP y puerto del servidor (ej. 192.168.1.50:9443).", true)
+		ShowMessageBox(hwnd, "Dirección requerida", "Introduce la dirección de tu servidor puente (ej. remoto.tudominio.com:9443).", true)
 		return
 	}
 
@@ -1184,7 +1453,7 @@ func (a *AdminWindow) handleSaveClient(hwnd uintptr) {
 	a.noticeText = fmt.Sprintf("Cliente guardado en %s (%s).", filepath.Base(destPath), addr)
 	a.noticeIsError = false
 	a.mu.Unlock()
-	a.syncBuilderControls(hwnd)
+	a.syncFormControls(hwnd)
 	procInvalidateRect.Call(hwnd, 0, 0)
 }
 
@@ -1211,13 +1480,8 @@ func adminWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 
-	case wmSize:
-		a.syncBuilderControls(hwnd)
-		procInvalidateRect.Call(hwnd, 0, 0)
-		return 0
-
-	case wmAdminRefresh:
-		a.syncBuilderControls(hwnd)
+	case wmSize, wmAdminRefresh:
+		a.syncFormControls(hwnd)
 		procInvalidateRect.Call(hwnd, 0, 0)
 		return 0
 
@@ -1230,7 +1494,7 @@ func adminWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		if req != nil && v != nil {
 			v.Open(req.sessionID, req.hostname, req.width, req.height, req.monitorCount)
 		}
-		a.syncBuilderControls(hwnd)
+		a.syncFormControls(hwnd)
 		procInvalidateRect.Call(hwnd, 0, 0)
 		return 0
 
@@ -1241,7 +1505,7 @@ func adminWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		if v != nil {
 			v.CloseUI()
 		}
-		a.syncBuilderControls(hwnd)
+		a.syncFormControls(hwnd)
 		procInvalidateRect.Call(hwnd, 0, 0)
 		return 0
 
@@ -1339,31 +1603,36 @@ func getControlText(hwnd uintptr) string {
 	return syscall.UTF16ToString(buf)
 }
 
-func copyTextToClipboard(hwnd uintptr, text string) bool {
-	u16, err := syscall.UTF16FromString(text)
-	if err != nil || len(u16) == 0 {
-		return false
+func setControlText(hwnd uintptr, s string) {
+	u16, err := syscall.UTF16PtrFromString(s)
+	if err != nil {
+		return
 	}
+	procSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(u16)))
+}
+
+func readTextFromClipboard(hwnd uintptr) string {
 	if ok, _, _ := procOpenClipboard.Call(hwnd); ok == 0 {
-		return false
+		return ""
 	}
 	defer procCloseClipboard.Call()
-	procEmptyClipboard.Call()
 
-	byteLen := uintptr(len(u16) * 2)
-	hMem, _, _ := procGlobalAlloc.Call(gmemMoveable, byteLen)
+	hMem, _, _ := procGetClipboardData.Call(cfUnicodeText)
 	if hMem == 0 {
-		return false
+		return ""
 	}
 	locked, _, _ := procGlobalLock.Call(hMem)
 	if locked == 0 {
-		return false
+		return ""
 	}
-	dstPtr := *(*unsafe.Pointer)(unsafe.Pointer(&locked))
-	dst := unsafe.Slice((*uint16)(dstPtr), len(u16))
-	copy(dst, u16)
-	procGlobalUnlock.Call(hMem)
+	defer procGlobalUnlock.Call(hMem)
 
-	res, _, _ := procSetClipboardData.Call(cfUnicodeText, hMem)
-	return res != 0
+	ptr := *(*unsafe.Pointer)(unsafe.Pointer(&locked))
+	// Read null-terminated UTF-16 string safely (cap at 4096 code units).
+	u16 := unsafe.Slice((*uint16)(ptr), 4096)
+	end := 0
+	for end < len(u16) && u16[end] != 0 {
+		end++
+	}
+	return syscall.UTF16ToString(u16[:end])
 }

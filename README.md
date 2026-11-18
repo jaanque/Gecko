@@ -1,21 +1,29 @@
-# Control Remoto Simple
+# Control Remoto Simple (con Servidor Puente)
 
-Aplicación de escritorio nativa para Windows, ligera, rápida y segura para control remoto entre PCs, construida en **Go puro sin dependencias externas**.
+Aplicación de control remoto nativa para Windows con **servidor puente (Relay TLS 1.3)** para conectar PCs en **cualquier red** sin abrir puertos en el PC del administrador ni en los clientes, construida en **Go puro sin dependencias externas**.
 
-## Cómo funciona
+```text
+[ ClienteRemoto.exe ] ──TLS 1.3──▶ [ RelayServidor (VPS) ] ◀──TLS 1.3── [ AdminRemoto.exe ]
+  (Cualquier red)                     (Puente seguro)                     (Cualquier red)
+```
 
-1. **Aplicación de Administración (`AdminRemoto.exe`)**:
-   - Aplicación de escritorio nativa de Windows (sin navegador ni consola) con menú superior fijo:
-     - **Equipos**: lista en tiempo real de equipos en línea; pulsa cualquiera para solicitar acceso.
-     - **Crear cliente**: configura IP:Puerto, título de ventana, mensaje de solicitud, calidad inicial, tiempo de espera, inicio minimizado, sonido, botón Desconectar y logo personalizado (PNG/JPG), y guarda **`ClienteRemoto.exe`** (un único ejecutable válido para todos los equipos).
-   - Visor remoto nativo:
-     - Muestra por defecto el **Monitor 1**; si hay varios monitores, permite saltar entre ellos (`M1`, `M2`, …) o ver **`Todos`** a la vez.
-     - Barra superior ocultable (`▲` / `▼ Menú`), calidad **Baja / Estándar / Alta**, FPS y latencia en tiempo real, y atajos **`F11`** (pantalla completa), **`Ctrl+Alt+M`** (menú) y **`Ctrl+Alt+Q`** (desconectar).
+## Componentes
 
-2. **Aplicación Cliente (`ClienteRemoto.exe`)**:
-   - Ejecutable nativo de Windows sin instalación ni dependencias.
-   - Muestra el logo (si se configuró), el **nombre del equipo** y su estado de conexión.
-   - Al recibir solicitud del administrador, ofrece únicamente **Permitir** o **Denegar**.
+1. **Servidor Puente (`RelayServidor` / `RelayServidor.exe`)**:
+   - Se levanta en tu VPS, servidor Linux/Windows o Docker (puerto TCP `9443`).
+   - Genera automáticamente su certificado TLS 1.3 y dos tokens independientes (**Admin** y **Cliente**) en `./data`.
+   - Muestra en consola una única clave **`RMT1:...`** para pegar en `AdminRemoto.exe`.
+
+2. **Aplicación de Administración (`AdminRemoto.exe`)**:
+   - Aplicación de escritorio nativa con menú superior fijo:
+     - **Equipos**: lista en tiempo real de todos los PCs conectados a tu servidor puente.
+     - **Crear cliente**: genera **`ClienteRemoto.exe`** (el mismo archivo sirve para todos los equipos) con dirección del servidor puente, título, mensaje, calidad inicial, tiempo de espera, inicio minimizado, sonido, botón Desconectar y logo personalizado (PNG/JPG).
+     - **Servidor**: pega la dirección de tu servidor y su clave **`RMT1:...`** una sola vez.
+   - Visor remoto nativo: Monitor 1 por defecto con selector **`M1 / M2 / Todos`**, calidad **Baja / Estándar / Alta**, FPS/latencia en vivo y atajos **`F11`**, **`Ctrl+Alt+M`** y **`Ctrl+Alt+Q`**.
+
+3. **Aplicación Cliente (`ClienteRemoto.exe`)**:
+   - Ejecutable nativo de Windows sin instalación.
+   - Muestra el logo (si se configuró), el **nombre del equipo** y su estado; al recibir solicitud del administrador solo ofrece **Permitir** o **Denegar**.
 
 ## Compilación
 
@@ -25,29 +33,46 @@ Requisitos: Go 1.22 o superior.
 build.bat
 ```
 
-*(También incluido `build.ps1` para PowerShell.)*
+Genera en `dist\`:
+- `AdminRemoto.exe` (Windows 64-bit)
+- `RelayServidor` (Linux 64-bit estático, listo para subir a cualquier VPS)
+- `RelayServidor.exe` (Windows 64-bit)
 
-Genera `dist\AdminRemoto.exe` con la plantilla del cliente ya incrustada.
+## Despliegue del servidor puente
+
+### Opción A: VPS Linux (binario directo)
+```bash
+chmod +x RelayServidor
+./RelayServidor -listen :9443 -public-addr remoto.tudominio.com:9443
+```
+
+### Opción B: Docker
+```bash
+docker build -t remote-relay .
+docker run -d --name remote-relay --restart unless-stopped \
+  -p 9443:9443 \
+  -v relay_data:/data \
+  -e RELAY_PUBLIC_ADDR=remoto.tudominio.com:9443 \
+  remote-relay
+docker logs remote-relay
+```
+
+### Opción C: Servidor Windows
+```cmd
+RelayServidor.exe -listen :9443 -public-addr remoto.tudominio.com:9443
+```
+
+> Abre únicamente el puerto TCP **9443** en el firewall del servidor puente. Ni el PC del administrador ni los PCs cliente necesitan abrir puertos.
 
 ## Uso rápido
 
-1. Abre `dist\AdminRemoto.exe` en el PC del administrador (en el primer arranque crea `data\` con el certificado TLS 1.3 y el token).
-2. Ve a **Crear cliente**, ajusta las opciones que quieras y guarda **`ClienteRemoto.exe`**.
-3. Ejecuta ese mismo **`ClienteRemoto.exe`** en cualquier equipo a administrar.
-4. En **Equipos**, pulsa el equipo conectado para solicitar control.
+1. Arranca `RelayServidor` en tu servidor y copia la línea **`RMT1:...`** que imprime al iniciar.
+2. Abre `dist\AdminRemoto.exe`, pega la dirección de tu servidor y la clave **`RMT1:...`** en **Servidor**, y pulsa **Guardar y conectar**.
+3. Ve a **Crear cliente**, personaliza las opciones que quieras y guarda **`ClienteRemoto.exe`**.
+4. Ejecuta ese **`ClienteRemoto.exe`** en cualquier PC (esté en tu red o en otra distinta) y aparecerá automáticamente en **Equipos**.
 
-> **Firewall de Windows**: permite el puerto TCP **9443** (configurable con `-agent-port`) en el PC del administrador si conectas equipos en red local.
+## Seguridad
 
-## Opciones de línea de comandos (`AdminRemoto.exe`)
-
-| Flag | Por defecto | Descripción |
-| :--- | :--- | :--- |
-| `-agent-port` | `9443` | Puerto TCP (TLS 1.3) para clientes |
-| `-data-dir` | `./data` | Carpeta para certificados y token |
-
-## Arquitectura y seguridad
-
-- **Cero dependencias externas**: 100 % biblioteca estándar de Go + API nativa Win32.
-- **TLS 1.3 con Certificate Pinning (SHA-256)** + token aleatorio de 256 bits verificado en tiempo constante.
-- **Consentimiento explícito en el cliente**: sin captura ni control de entrada hasta pulsar **Permitir**.
-- **Vídeo y control optimizados**: bloques `64×64` con códec híbrido (sin pérdida `Zlib-BGR` para texto/UI + JPEG paralelo para vídeo), control de flujo por ACK hasta 60 FPS, ratón de 5 botones a 120 Hz coalescente y reenvío nativo de atajos de sistema en primer plano.
+- **TLS 1.3 obligatorio + Certificate Pinning (SHA-256)** tanto en `AdminRemoto.exe` como en `ClienteRemoto.exe`.
+- **Separación de roles por token**: `ClienteRemoto.exe` solo recibe `ClientToken` y nunca puede autenticarse como administrador ni listar otros equipos.
+- **Consentimiento explícito**: el cliente nunca envía vídeo ni acepta entrada hasta que el usuario pulsa **Permitir**.

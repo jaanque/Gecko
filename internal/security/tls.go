@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -21,15 +22,75 @@ import (
 	"time"
 )
 
-// ServerIdentity holds the persisted TLS certificate, its SHA-256 fingerprint, and the shared auth token.
+const adminKeyPrefix = "RMT1:"
+
+// ServerIdentity holds the persisted Relay TLS certificate, its SHA-256 fingerprint,
+// and separate authentication tokens for Admin and Client roles.
 type ServerIdentity struct {
 	Certificate tls.Certificate
 	CertSHA256  string
-	AuthToken   string
+	AdminToken  string
+	ClientToken string
+}
+
+// RelayProfile holds everything AdminRemoto.exe needs to connect to the Relay server
+// and generate ClienteRemoto.exe binaries.
+type RelayProfile struct {
+	ServerAddr  string `json:"server_addr,omitempty"`
+	CertSHA256  string `json:"cert_sha256"`
+	AdminToken  string `json:"admin_token"`
+	ClientToken string `json:"client_token"`
+}
+
+// Validate checks that all required RelayProfile fields are well-formed.
+func (p RelayProfile) Validate() error {
+	if strings.TrimSpace(p.ServerAddr) == "" {
+		return errors.New("la dirección del servidor es obligatoria")
+	}
+	if len(strings.TrimSpace(p.CertSHA256)) != 64 {
+		return errors.New("la huella TLS SHA-256 debe tener 64 caracteres hexadecimales")
+	}
+	if len(strings.TrimSpace(p.AdminToken)) < 32 {
+		return errors.New("el token de administrador no es válido")
+	}
+	if len(strings.TrimSpace(p.ClientToken)) < 32 {
+		return errors.New("el token de cliente no es válido")
+	}
+	return nil
+}
+
+// EncodeProfileKey packs a RelayProfile into a compact copy-pasteable string ("RMT1:...").
+func EncodeProfileKey(p RelayProfile) (string, error) {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	return adminKeyPrefix + base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// DecodeProfileKey unpacks a "RMT1:..." key into a RelayProfile.
+func DecodeProfileKey(key string) (RelayProfile, error) {
+	s := strings.TrimSpace(key)
+	if !strings.HasPrefix(s, adminKeyPrefix) {
+		return RelayProfile{}, errors.New("clave de servidor inválida (debe empezar por RMT1:)")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(s, adminKeyPrefix))
+	if err != nil {
+		return RelayProfile{}, errors.New("clave de servidor malformada")
+	}
+	var p RelayProfile
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return RelayProfile{}, errors.New("clave de servidor corrupta")
+	}
+	if len(p.CertSHA256) != 64 || len(p.AdminToken) < 32 || len(p.ClientToken) < 32 {
+		return RelayProfile{}, errors.New("la clave no contiene credenciales válidas")
+	}
+	return p, nil
 }
 
 type secretFile struct {
-	AuthToken string `json:"auth_token"`
+	AdminToken  string `json:"admin_token"`
+	ClientToken string `json:"client_token"`
 }
 
 // RandomHex returns n random bytes encoded as lowercase hex.
@@ -41,7 +102,7 @@ func RandomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// LoadOrCreateIdentity loads or creates server.crt, server.key, and secret.json inside dataDir.
+// LoadOrCreateIdentity loads or creates server.crt, server.key, and relay_secret.json inside dataDir.
 func LoadOrCreateIdentity(dataDir string) (*ServerIdentity, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating data dir: %w", err)
@@ -49,7 +110,7 @@ func LoadOrCreateIdentity(dataDir string) (*ServerIdentity, error) {
 
 	certPath := filepath.Join(dataDir, "server.crt")
 	keyPath := filepath.Join(dataDir, "server.key")
-	secretPath := filepath.Join(dataDir, "secret.json")
+	secretPath := filepath.Join(dataDir, "relay_secret.json")
 
 	if !fileExists(certPath) || !fileExists(keyPath) {
 		if err := generateSelfSignedCert(certPath, keyPath); err != nil {
@@ -67,15 +128,16 @@ func LoadOrCreateIdentity(dataDir string) (*ServerIdentity, error) {
 	sum := sha256.Sum256(cert.Certificate[0])
 	fingerprint := hex.EncodeToString(sum[:])
 
-	token, err := loadOrCreateToken(secretPath)
+	adminTok, clientTok, err := loadOrCreateTokens(secretPath)
 	if err != nil {
-		return nil, fmt.Errorf("loading auth token: %w", err)
+		return nil, fmt.Errorf("loading relay tokens: %w", err)
 	}
 
 	return &ServerIdentity{
 		Certificate: cert,
 		CertSHA256:  fingerprint,
-		AuthToken:   token,
+		AdminToken:  adminTok,
+		ClientToken: clientTok,
 	}, nil
 }
 
@@ -119,6 +181,19 @@ func ConstantTimeTokenEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// ShortFingerprint formats the first 16 hex chars of a SHA-256 fingerprint for display.
+func ShortFingerprint(hexFP string) string {
+	if len(hexFP) < 16 {
+		return hexFP
+	}
+	upper := strings.ToUpper(hexFP[:16])
+	var parts []string
+	for i := 0; i < len(upper); i += 4 {
+		parts = append(parts, upper[i:i+4])
+	}
+	return strings.Join(parts, ":") + "…"
+}
+
 func generateSelfSignedCert(certPath, keyPath string) error {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -135,7 +210,7 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   "RemoteControl-Admin",
+			CommonName:   "RemoteControl-Relay",
 			Organization: []string{"RemoteControl"},
 		},
 		NotBefore:             now.Add(-5 * time.Minute),
@@ -167,29 +242,35 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	return nil
 }
 
-func loadOrCreateToken(path string) (string, error) {
+func loadOrCreateTokens(path string) (string, string, error) {
 	if fileExists(path) {
 		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", err
-		}
-		var sf secretFile
-		if err := json.Unmarshal(data, &sf); err == nil && len(sf.AuthToken) >= 32 {
-			return sf.AuthToken, nil
+		if err == nil {
+			var sf secretFile
+			if json.Unmarshal(data, &sf) == nil && len(sf.AdminToken) >= 32 && len(sf.ClientToken) >= 32 {
+				return sf.AdminToken, sf.ClientToken, nil
+			}
 		}
 	}
-	tok, err := RandomHex(32)
+	adminTok, err := RandomHex(32)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	raw, err := json.MarshalIndent(secretFile{AuthToken: tok}, "", "  ")
+	clientTok, err := RandomHex(32)
 	if err != nil {
-		return "", err
+		return "", "", err
+	}
+	raw, err := json.MarshalIndent(secretFile{
+		AdminToken:  adminTok,
+		ClientToken: clientTok,
+	}, "", "  ")
+	if err != nil {
+		return "", "", err
 	}
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return tok, nil
+	return adminTok, clientTok, nil
 }
 
 func fileExists(path string) bool {

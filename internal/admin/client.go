@@ -1,0 +1,542 @@
+package admin
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"remote-control/internal/config"
+	"remote-control/internal/protocol"
+	"remote-control/internal/security"
+)
+
+// ClientBuildOptions contains all admin-configurable settings embedded into ClienteRemoto.exe.
+type ClientBuildOptions struct {
+	ServerAddr        string
+	LogoPNG           []byte
+	AppTitle          string
+	PromptMessage     string
+	ConsentTimeoutSec int
+	DefaultQuality    int
+	StartMinimized    bool
+	HideDisconnect    bool
+	MuteSound         bool
+}
+
+// RelayEvents delivers real-time Relay state and remote session callbacks to the desktop UI.
+type RelayEvents struct {
+	OnRelayStatus    func(connected bool, detail string)
+	OnClientsChanged func(clients []protocol.ClientSummary)
+	OnSessionPending func(sessionID, clientID, hostname string)
+	OnSessionStarted func(sessionID, clientID, hostname string, width, height, monitorCount int)
+	OnSessionDenied  func(sessionID, clientID, hostname, reason string)
+	OnSessionEnded   func(sessionID, hostname, reason string)
+	OnSessionError   func(reason string)
+	OnFrame          func(sessionID string, frameData []byte)
+	OnLatency        func(rttMs int)
+}
+
+// RelayClient maintains an outbound TLS 1.3 connection from AdminRemoto.exe to RelayServidor.
+type RelayClient struct {
+	profilePath string
+
+	mu            sync.RWMutex
+	profile       security.RelayProfile
+	hasProfile    bool
+	events        RelayEvents
+	conn          net.Conn
+	writeMu       sync.Mutex
+	activeSession string
+	loopCancel    context.CancelFunc
+}
+
+// NewRelayClient constructs a RelayClient and loads any saved RelayProfile from dataDir.
+func NewRelayClient(dataDir string) *RelayClient {
+	rc := &RelayClient{
+		profilePath: filepath.Join(dataDir, "admin_profile.json"),
+	}
+	if data, err := os.ReadFile(rc.profilePath); err == nil {
+		var p security.RelayProfile
+		if json.Unmarshal(data, &p) == nil && p.Validate() == nil {
+			rc.profile = p
+			rc.hasProfile = true
+		}
+	}
+	return rc
+}
+
+// SetEvents registers the desktop UI callbacks.
+func (c *RelayClient) SetEvents(ev RelayEvents) {
+	c.mu.Lock()
+	c.events = ev
+	c.mu.Unlock()
+}
+
+// Profile returns the current saved RelayProfile (and whether one is configured).
+func (c *RelayClient) Profile() (security.RelayProfile, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.profile, c.hasProfile
+}
+
+// Configure saves a new RelayProfile to disk and reconnects to the Relay server immediately.
+func (c *RelayClient) Configure(p security.RelayProfile) error {
+	p.ServerAddr = normalizeHostPort(p.ServerAddr, "9443")
+	p.CertSHA256 = strings.ToLower(strings.TrimSpace(p.CertSHA256))
+	p.AdminToken = strings.TrimSpace(p.AdminToken)
+	p.ClientToken = strings.TrimSpace(p.ClientToken)
+
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	if _, err := security.PinnedClientTLSConfig(p.CertSHA256); err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(c.profilePath), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(c.profilePath, raw, 0o600); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.profile = p
+	c.hasProfile = true
+	c.mu.Unlock()
+
+	c.Start()
+	return nil
+}
+
+// Start begins (or restarts) the background auto-reconnecting Relay connection loop.
+func (c *RelayClient) Start() {
+	c.mu.Lock()
+	if c.loopCancel != nil {
+		c.loopCancel()
+		c.loopCancel = nil
+	}
+	if !c.hasProfile {
+		ev := c.events
+		c.mu.Unlock()
+		if ev.OnRelayStatus != nil {
+			ev.OnRelayStatus(false, "Sin servidor configurado")
+		}
+		return
+	}
+	prof := c.profile
+	ctx, cancel := context.WithCancel(context.Background())
+	c.loopCancel = cancel
+	c.mu.Unlock()
+
+	go c.runLoop(ctx, prof)
+}
+
+// Close shuts down the Relay connection cleanly.
+func (c *RelayClient) Close() {
+	c.DisconnectSession("Administrador cerrado")
+	c.mu.Lock()
+	if c.loopCancel != nil {
+		c.loopCancel()
+		c.loopCancel = nil
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+	}
+	c.mu.Unlock()
+}
+
+// GenerateClientBinary creates a ClienteRemoto.exe bound to the configured Relay server
+// using the Relay's pinned certificate and ClientToken (never AdminToken).
+func (c *RelayClient) GenerateClientBinary(template []byte, opts ClientBuildOptions) ([]byte, error) {
+	if len(template) == 0 {
+		return nil, errors.New("plantilla de cliente no disponible; compila el proyecto con build.bat")
+	}
+	c.mu.RLock()
+	prof := c.profile
+	ok := c.hasProfile
+	c.mu.RUnlock()
+
+	if !ok {
+		return nil, errors.New("configura primero el servidor puente en la pestaña Servidor")
+	}
+
+	addr := strings.TrimSpace(opts.ServerAddr)
+	if addr == "" {
+		addr = prof.ServerAddr
+	}
+	addr = normalizeHostPort(addr, "9443")
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return nil, errors.New("dirección de servidor inválida (usa dominio:puerto o IP:puerto)")
+	}
+
+	timeout := opts.ConsentTimeoutSec
+	if timeout < 10 {
+		timeout = 60
+	} else if timeout > 300 {
+		timeout = 300
+	}
+
+	quality := opts.DefaultQuality
+	if quality != 55 && quality != 78 && quality != 92 {
+		quality = 78
+	}
+
+	return config.AppendToBinary(template, config.ClientConfig{
+		ServerAddr:        addr,
+		CertSHA256:        prof.CertSHA256,
+		AuthToken:         prof.ClientToken,
+		LogoPNG:           opts.LogoPNG,
+		AppTitle:          strings.TrimSpace(opts.AppTitle),
+		PromptMessage:     strings.TrimSpace(opts.PromptMessage),
+		ConsentTimeoutSec: timeout,
+		DefaultQuality:    quality,
+		StartMinimized:    opts.StartMinimized,
+		HideDisconnect:    opts.HideDisconnect,
+		MuteSound:         opts.MuteSound,
+	})
+}
+
+// RequestConnect asks the Relay to request remote control of clientID.
+func (c *RelayClient) RequestConnect(clientID string) error {
+	conn := c.currentConn()
+	if conn == nil {
+		return errors.New("no hay conexión con el servidor puente")
+	}
+	return c.writeJSON(conn, protocol.MsgAdminConnect, protocol.AdminConnectPayload{ClientID: clientID})
+}
+
+// DisconnectSession terminates any active or pending remote session.
+func (c *RelayClient) DisconnectSession(reason string) {
+	c.mu.Lock()
+	conn := c.conn
+	sid := c.activeSession
+	c.activeSession = ""
+	c.mu.Unlock()
+
+	if conn != nil {
+		_ = c.writeJSON(conn, protocol.MsgSessionStop, protocol.SessionStopPayload{
+			SessionID: sid,
+			Reason:    reason,
+		})
+	}
+}
+
+// SendFrameAck forwards a frame acknowledgment to the active client through the Relay.
+func (c *RelayClient) SendFrameAck(frameID uint32) {
+	if conn := c.currentConn(); conn != nil {
+		_ = c.writeMessage(conn, protocol.MsgFrameAck, protocol.EncodeFrameAck(frameID))
+	}
+}
+
+// SendMouse forwards a mouse event to the active client through the Relay.
+func (c *RelayClient) SendMouse(ev protocol.MouseEvent) {
+	if conn := c.currentConn(); conn != nil {
+		_ = c.writeMessage(conn, protocol.MsgMouse, protocol.EncodeMouse(ev))
+	}
+}
+
+// SendKey forwards a keyboard event to the active client through the Relay.
+func (c *RelayClient) SendKey(ev protocol.KeyEvent) {
+	if conn := c.currentConn(); conn != nil {
+		_ = c.writeMessage(conn, protocol.MsgKey, protocol.EncodeKey(ev))
+	}
+}
+
+// SendStreamConfig updates quality on the active client through the Relay.
+func (c *RelayClient) SendStreamConfig(quality int, keyframe bool) {
+	if conn := c.currentConn(); conn != nil {
+		_ = c.writeJSON(conn, protocol.MsgStreamConfig, protocol.StreamConfigPayload{
+			Quality:  quality,
+			Keyframe: keyframe,
+		})
+	}
+}
+
+// SendSelectMonitor switches active monitor on the active client through the Relay.
+func (c *RelayClient) SendSelectMonitor(monitorIndex int) {
+	if conn := c.currentConn(); conn != nil {
+		m := monitorIndex
+		_ = c.writeJSON(conn, protocol.MsgStreamConfig, protocol.StreamConfigPayload{
+			Monitor:  &m,
+			Keyframe: true,
+		})
+	}
+}
+
+func (c *RelayClient) currentConn() net.Conn {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.conn
+}
+
+func (c *RelayClient) runLoop(ctx context.Context, prof security.RelayProfile) {
+	tlsCfg, err := security.PinnedClientTLSConfig(prof.CertSHA256)
+	if err != nil {
+		c.emitStatus(false, "Certificado TLS inválido")
+		return
+	}
+
+	backoff := time.Second
+	for ctx.Err() == nil {
+		c.emitStatus(false, "Conectando a "+prof.ServerAddr+"...")
+
+		err := c.connectAndServe(ctx, prof, tlsCfg)
+
+		c.mu.Lock()
+		hadSession := c.activeSession != ""
+		c.activeSession = ""
+		c.conn = nil
+		ev := c.events
+		c.mu.Unlock()
+
+		if ev.OnClientsChanged != nil {
+			ev.OnClientsChanged(nil)
+		}
+		if hadSession && ev.OnSessionEnded != nil {
+			ev.OnSessionEnded("", "", "Se perdió la conexión con el servidor puente.")
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		if err != nil {
+			c.emitStatus(false, err.Error())
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if backoff < 5*time.Second {
+			backoff += time.Second
+		}
+	}
+}
+
+func (c *RelayClient) connectAndServe(ctx context.Context, prof security.RelayProfile, tlsCfg *tls.Config) error {
+	dialer := &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 15 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", prof.ServerAddr, tlsCfg)
+	if err != nil {
+		return fmt.Errorf("sin conexión (%s)", prof.ServerAddr)
+	}
+	defer conn.Close()
+
+	if tc, ok := conn.NetConn().(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(512 * 1024)
+		_ = tc.SetWriteBuffer(256 * 1024)
+	}
+
+	doneConn := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-doneConn:
+		}
+	}()
+	defer close(doneConn)
+
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := protocol.WriteJSON(conn, protocol.MsgAdminAuth, protocol.AdminAuthPayload{
+		Token: prof.AdminToken,
+	}); err != nil {
+		return err
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	msgType, payload, err := protocol.ReadMessage(conn)
+	if err != nil || msgType != protocol.MsgAuthResp {
+		return errors.New("respuesta inválida del servidor")
+	}
+	var resp protocol.AuthRespPayload
+	if err := json.Unmarshal(payload, &resp); err != nil || !resp.OK {
+		return errors.New("token de administrador rechazado")
+	}
+
+	c.mu.Lock()
+	c.conn = conn
+	c.mu.Unlock()
+	c.emitStatus(true, prof.ServerAddr)
+
+	// Periodic heartbeat (every 10s when idle) and end-to-end RTT probe (every 2s during active session).
+	pingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		ticks := 0
+		var ts [8]byte
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ticks++
+				c.mu.RLock()
+				inSess := c.activeSession != ""
+				c.mu.RUnlock()
+				if inSess {
+					binary.BigEndian.PutUint64(ts[:], uint64(time.Now().UnixNano()))
+					if err := c.writeMessage(conn, protocol.MsgPing, ts[:]); err != nil {
+						_ = conn.Close()
+						return
+					}
+				} else if ticks%5 == 0 {
+					if err := c.writeMessage(conn, protocol.MsgPing, nil); err != nil {
+						_ = conn.Close()
+						return
+					}
+				}
+			}
+		}
+	}()
+	defer close(pingDone)
+
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(35 * time.Second))
+		mType, data, err := protocol.ReadMessage(conn)
+		if err != nil {
+			return errors.New("conexión interrumpida")
+		}
+
+		switch mType {
+		case protocol.MsgPing:
+			_ = c.writeMessage(conn, protocol.MsgPong, data)
+
+		case protocol.MsgPong:
+			if len(data) == 8 {
+				sent := int64(binary.BigEndian.Uint64(data))
+				rttMs := int((time.Now().UnixNano() - sent) / int64(time.Millisecond))
+				if rttMs < 0 {
+					rttMs = 0
+				}
+				c.mu.RLock()
+				cb := c.events.OnLatency
+				c.mu.RUnlock()
+				if cb != nil {
+					cb(rttMs)
+				}
+			}
+
+		case protocol.MsgClientList:
+			var list []protocol.ClientSummary
+			if json.Unmarshal(data, &list) == nil {
+				c.mu.RLock()
+				cb := c.events.OnClientsChanged
+				c.mu.RUnlock()
+				if cb != nil {
+					cb(list)
+				}
+			}
+
+		case protocol.MsgSessionEvent:
+			var sev protocol.SessionEventPayload
+			if json.Unmarshal(data, &sev) == nil {
+				c.handleSessionEvent(sev)
+			}
+
+		case protocol.MsgFrame:
+			c.mu.RLock()
+			sid := c.activeSession
+			cb := c.events.OnFrame
+			c.mu.RUnlock()
+			if sid != "" && cb != nil {
+				cb(sid, data)
+			}
+		}
+	}
+}
+
+func (c *RelayClient) handleSessionEvent(sev protocol.SessionEventPayload) {
+	c.mu.Lock()
+	ev := c.events
+	switch sev.Event {
+	case "started":
+		c.activeSession = sev.SessionID
+	case "denied", "ended", "error":
+		if sev.SessionID == "" || sev.SessionID == c.activeSession {
+			c.activeSession = ""
+		}
+	}
+	c.mu.Unlock()
+
+	switch sev.Event {
+	case "pending":
+		if ev.OnSessionPending != nil {
+			ev.OnSessionPending(sev.SessionID, sev.ClientID, sev.Hostname)
+		}
+	case "started":
+		if ev.OnSessionStarted != nil {
+			ev.OnSessionStarted(sev.SessionID, sev.ClientID, sev.Hostname, sev.Width, sev.Height, sev.MonitorCount)
+		}
+	case "denied":
+		if ev.OnSessionDenied != nil {
+			ev.OnSessionDenied(sev.SessionID, sev.ClientID, sev.Hostname, sev.Reason)
+		}
+	case "ended":
+		if ev.OnSessionEnded != nil {
+			ev.OnSessionEnded(sev.SessionID, sev.Hostname, sev.Reason)
+		}
+	case "error":
+		if ev.OnSessionError != nil {
+			ev.OnSessionError(sev.Reason)
+		}
+	}
+}
+
+func (c *RelayClient) emitStatus(connected bool, detail string) {
+	c.mu.RLock()
+	cb := c.events.OnRelayStatus
+	c.mu.RUnlock()
+	if cb != nil {
+		cb(connected, detail)
+	}
+}
+
+func (c *RelayClient) writeMessage(conn net.Conn, msgType uint8, payload []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return protocol.WriteMessage(conn, msgType, payload)
+}
+
+func (c *RelayClient) writeJSON(conn net.Conn, msgType uint8, v any) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return protocol.WriteJSON(conn, msgType, v)
+}
+
+func normalizeHostPort(addr, defaultPort string) string {
+	s := strings.TrimSpace(addr)
+	if s == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(s); err == nil {
+		return s
+	}
+	if !strings.Contains(s, ":") {
+		return net.JoinHostPort(s, defaultPort)
+	}
+	return s
+}

@@ -6,20 +6,39 @@ import (
 	"testing"
 )
 
-func TestPinnedTLSHandshake(t *testing.T) {
+func TestPinnedTLSHandshakeAndProfileKey(t *testing.T) {
 	dir := t.TempDir()
 	id, err := LoadOrCreateIdentity(dir)
 	if err != nil {
 		t.Fatalf("LoadOrCreateIdentity failed: %v", err)
 	}
+	if id.AdminToken == id.ClientToken {
+		t.Fatal("admin and client tokens must be distinct")
+	}
 
-	// Loading again must preserve the exact same fingerprint and token.
+	// Loading again must preserve fingerprint and both tokens.
 	id2, err := LoadOrCreateIdentity(dir)
 	if err != nil {
 		t.Fatalf("second LoadOrCreateIdentity failed: %v", err)
 	}
-	if id.CertSHA256 != id2.CertSHA256 || id.AuthToken != id2.AuthToken {
+	if id.CertSHA256 != id2.CertSHA256 || id.AdminToken != id2.AdminToken || id.ClientToken != id2.ClientToken {
 		t.Fatal("expected persisted identity across reloads")
+	}
+
+	// Profile key round-trip.
+	prof := RelayProfile{
+		ServerAddr:  "remoto.ejemplo.com:9443",
+		CertSHA256:  id.CertSHA256,
+		AdminToken:  id.AdminToken,
+		ClientToken: id.ClientToken,
+	}
+	key, err := EncodeProfileKey(prof)
+	if err != nil {
+		t.Fatalf("EncodeProfileKey failed: %v", err)
+	}
+	gotProf, err := DecodeProfileKey(key)
+	if err != nil || gotProf != prof {
+		t.Fatalf("DecodeProfileKey mismatch: got %+v err=%v", gotProf, err)
 	}
 
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", ServerTLSConfig(id.Certificate))
@@ -41,7 +60,7 @@ func TestPinnedTLSHandshake(t *testing.T) {
 		}
 	}()
 
-	// Valid pin succeeds.
+	// Valid pin succeeds with TLS 1.3.
 	goodCfg, err := PinnedClientTLSConfig(id.CertSHA256)
 	if err != nil {
 		t.Fatalf("PinnedClientTLSConfig failed: %v", err)

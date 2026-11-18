@@ -1,24 +1,33 @@
 $ErrorActionPreference = "Stop"
 
-$env:GOOS = "windows"
-$env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
+$env:GOARCH = "amd64"
 
 function Show-Bar([int]$Pct, [string]$Msg) {
     $fill = [int]($Pct / 5)
     $bar = ("#" * $fill).PadRight(20, ".")
-    Write-Host ("`r[{0}] {1,3}%  {2,-30}" -f $bar, $Pct, $Msg) -NoNewline
+    Write-Host ("`r[{0}] {1,3}%  {2,-24}" -f $bar, $Pct, $Msg) -NoNewline
 }
 
 New-Item -ItemType Directory -Force -Path "cmd\admin\assets", "dist" | Out-Null
 
-Show-Bar 10 "Cliente..."
+$env:GOOS = "windows"
+Show-Bar 20 "Cliente..."
 go build -trimpath -ldflags="-H=windowsgui -s -w" -o "cmd\admin\assets\client_template.exe" ./cmd/client
 if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
 
-Show-Bar 55 "Admin..."
+Show-Bar 50 "Admin..."
 go build -trimpath -ldflags="-H=windowsgui -s -w" -o "dist\AdminRemoto.exe" ./cmd/admin
 if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
 
-Show-Bar 100 "Listo: dist\AdminRemoto.exe"
+Show-Bar 75 "Relay (Win)..."
+go build -trimpath -ldflags="-s -w" -o "dist\RelayServidor.exe" ./cmd/relay
+if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
+
+$env:GOOS = "linux"
+Show-Bar 90 "Relay (Linux)..."
+go build -trimpath -ldflags="-s -w" -o "dist\RelayServidor" ./cmd/relay
+if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
+
+Show-Bar 100 "Listo: dist\"
 Write-Host ""

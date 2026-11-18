@@ -3,9 +3,7 @@
 package main
 
 import (
-	"crypto/tls"
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -18,8 +16,7 @@ import (
 func main() {
 	win.EnableDPIAwareness()
 
-	agentPort := flag.Int("agent-port", 9443, "Puerto TLS 1.3 donde escuchan los clientes")
-	dataDir := flag.String("data-dir", "", "Carpeta donde guardar certificados y token (por defecto: ./data junto al ejecutable)")
+	dataDir := flag.String("data-dir", "", "Carpeta donde guardar la configuración del servidor puente (por defecto: ./data junto al ejecutable)")
 	flag.Parse()
 
 	resolvedDataDir := *dataDir
@@ -31,63 +28,40 @@ func main() {
 		}
 	}
 
-	identity, err := security.LoadOrCreateIdentity(resolvedDataDir)
-	if err != nil {
-		win.ShowMessageBox(0, "Control Remoto · Error", fmt.Sprintf("No se pudo inicializar el certificado TLS:\n%v", err), true)
-		return
-	}
-
-	hub := admin.NewHub(identity, *agentPort)
-
-	agentAddr := fmt.Sprintf("0.0.0.0:%d", *agentPort)
-	agentListener, err := tls.Listen("tcp", agentAddr, security.ServerTLSConfig(identity.Certificate))
-	if err != nil {
-		win.ShowMessageBox(0, "Control Remoto · Error", fmt.Sprintf("No se pudo abrir el puerto %d:\n%v\n\nComprueba que no haya otra instancia abierta.", *agentPort, err), true)
-		return
-	}
-	defer agentListener.Close()
-
-	// Build suggested LAN addresses for the Generate Client modal.
-	ips := admin.DetectLocalIPs()
-	suggested := make([]string, 0, len(ips)+1)
-	for _, ip := range ips {
-		suggested = append(suggested, fmt.Sprintf("%s:%d", ip, *agentPort))
-	}
-	suggested = append(suggested, fmt.Sprintf("127.0.0.1:%d", *agentPort))
-
+	relayClient := admin.NewRelayClient(resolvedDataDir)
+	prof, hasProf := relayClient.Profile()
 	template := embeddedClientTemplate()
 
 	window := win.NewAdminWindow(win.AdminConfig{
-		AgentPort:       *agentPort,
-		SuggestedAddrs:  suggested,
-		CertFingerprint: hub.CertFingerprintShort(),
+		HasProfile: hasProf,
+		Profile:    prof,
 	}, win.AdminCallbacks{
 		OnConnect: func(clientID string) error {
-			return hub.RequestConnect(clientID)
+			return relayClient.RequestConnect(clientID)
 		},
 		OnCancelPending: func() {
-			hub.DisconnectSession("Cancelado por el administrador")
+			relayClient.DisconnectSession("Cancelado por el administrador")
 		},
 		OnDisconnect: func() {
-			hub.DisconnectSession("Desconectado por el administrador")
+			relayClient.DisconnectSession("Desconectado por el administrador")
 		},
 		OnMouse: func(ev protocol.MouseEvent) {
-			hub.SendMouse(ev)
+			relayClient.SendMouse(ev)
 		},
 		OnKey: func(ev protocol.KeyEvent) {
-			hub.SendKey(ev)
+			relayClient.SendKey(ev)
 		},
 		OnFrameAck: func(frameID uint32) {
-			hub.SendFrameAck(frameID)
+			relayClient.SendFrameAck(frameID)
 		},
 		OnQuality: func(quality int) {
-			hub.SendStreamConfig(quality, true)
+			relayClient.SendStreamConfig(quality, true)
 		},
 		OnSelectMonitor: func(monitorIndex int) {
-			hub.SendSelectMonitor(monitorIndex)
+			relayClient.SendSelectMonitor(monitorIndex)
 		},
 		OnGenerateClient: func(params win.ClientGenParams, destPath string) error {
-			built, err := hub.GenerateClientBinary(template, admin.ClientBuildOptions{
+			built, err := relayClient.GenerateClientBinary(template, admin.ClientBuildOptions{
 				ServerAddr:        params.ServerAddr,
 				LogoPNG:           params.LogoPNG,
 				AppTitle:          params.AppTitle,
@@ -103,14 +77,19 @@ func main() {
 			}
 			return os.WriteFile(destPath, built, 0o755)
 		},
+		OnSaveServer: func(p security.RelayProfile) error {
+			return relayClient.Configure(p)
+		},
 		OnClose: func() {
-			hub.DisconnectSession("Administrador cerrado")
-			_ = agentListener.Close()
+			relayClient.Close()
 		},
 	})
 
-	hub.SetEvents(admin.HubEvents{
-		OnClientsChanged: func(clients []admin.ClientInfo) {
+	relayClient.SetEvents(admin.RelayEvents{
+		OnRelayStatus: func(connected bool, detail string) {
+			window.SetRelayStatus(connected, detail)
+		},
+		OnClientsChanged: func(clients []protocol.ClientSummary) {
 			rows := make([]win.AdminClientRow, 0, len(clients))
 			for _, c := range clients {
 				rows = append(rows, win.AdminClientRow{
@@ -137,6 +116,9 @@ func main() {
 		OnSessionEnded: func(_, hostname, reason string) {
 			window.NotifyEnded(hostname, reason)
 		},
+		OnSessionError: func(reason string) {
+			window.NotifyError(reason)
+		},
 		OnFrame: func(sessionID string, frameData []byte) {
 			window.PushFrame(sessionID, frameData)
 		},
@@ -147,7 +129,7 @@ func main() {
 
 	go func() {
 		<-window.Ready()
-		_ = hub.ServeAgents(agentListener)
+		relayClient.Start()
 	}()
 
 	_ = window.Run()

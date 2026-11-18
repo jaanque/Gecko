@@ -21,10 +21,14 @@ const (
 	MsgAuthResp     uint8 = 0x02
 	MsgPing         uint8 = 0x03
 	MsgPong         uint8 = 0x04
+	MsgAdminAuth    uint8 = 0x05
+	MsgClientList   uint8 = 0x06
 	MsgConsentReq   uint8 = 0x10
 	MsgConsentResp  uint8 = 0x11
 	MsgSessionStop  uint8 = 0x12
 	MsgStreamConfig uint8 = 0x13
+	MsgAdminConnect uint8 = 0x14
+	MsgSessionEvent uint8 = 0x15
 	MsgFrame        uint8 = 0x20
 	MsgFrameAck     uint8 = 0x21
 	MsgMouse        uint8 = 0x30
@@ -84,6 +88,39 @@ type AuthRespPayload struct {
 	OK       bool   `json:"ok"`
 	ClientID string `json:"client_id,omitempty"`
 	Error    string `json:"error,omitempty"`
+}
+
+// AdminAuthPayload authenticates an Admin desktop app against the Relay server.
+type AdminAuthPayload struct {
+	Token string `json:"token"`
+}
+
+// ClientSummary describes an online client PC reported by the Relay to Admin.
+type ClientSummary struct {
+	ID           string `json:"id"`
+	Hostname     string `json:"hostname"`
+	IP           string `json:"ip"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	MonitorCount int    `json:"monitor_count"`
+	Status       string `json:"status"` // "online", "pending", "active"
+}
+
+// AdminConnectPayload requests remote control of a specific online client via the Relay.
+type AdminConnectPayload struct {
+	ClientID string `json:"client_id"`
+}
+
+// SessionEventPayload notifies Admin of session lifecycle changes from the Relay.
+type SessionEventPayload struct {
+	Event        string `json:"event"` // "pending", "started", "denied", "ended", "error"
+	SessionID    string `json:"session_id,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	Hostname     string `json:"hostname,omitempty"`
+	Width        int    `json:"width,omitempty"`
+	Height       int    `json:"height,omitempty"`
+	MonitorCount int    `json:"monitor_count,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 // ConsentReqPayload asks the client user to allow or deny remote control.
