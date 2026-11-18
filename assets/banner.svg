@@ -20,20 +20,6 @@
       <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
     </radialGradient>
 
-    <!-- Brand Ring Gradient -->
-    <linearGradient id="brandRingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#34d399"/>
-      <stop offset="50%" stop-color="#10b981"/>
-      <stop offset="100%" stop-color="#0284c7"/>
-    </linearGradient>
-
-    <!-- Gecko Body Gradient -->
-    <linearGradient id="geckoGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#6ee7b7"/>
-      <stop offset="35%" stop-color="#10b981"/>
-      <stop offset="100%" stop-color="#059669"/>
-    </linearGradient>
-
     <!-- Monitor Gradient -->
     <linearGradient id="monGrad" x1="0%" y1="0%" x2="0%" y2="100%">
       <stop offset="0%" stop-color="#1e2436"/>
@@ -53,12 +39,8 @@
       <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.2"/>
     </linearGradient>
 
-    <filter id="dropShadow" x="-15%" y="-15%" width="130%" height="135%">
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="130%">
       <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity="0.7"/>
-    </filter>
-    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
-      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
     </filter>
   </defs>
 
@@ -129,61 +111,11 @@
     <text x="130" y="94" text-anchor="middle" font-family="-apple-system, Segoe UI, sans-serif" font-size="7.5" font-weight="700" fill="#cbd5e1">Denegar</text>
   </g>
 
-  <!-- Center Emblem: Custom Vector Gecko Logo Mark -->
-  <g transform="translate(450, 195)" filter="url(#dropShadow)">
-    <!-- Outer Glow Aura -->
-    <circle cx="0" cy="0" r="38" fill="#10b981" fill-opacity="0.12" filter="url(#glow)"/>
-
-    <!-- Emblem Circular Base -->
-    <circle cx="0" cy="0" r="34" fill="#0d1424" stroke="url(#brandRingGrad)" stroke-width="2"/>
-    <circle cx="0" cy="0" r="29" fill="none" stroke="#253248" stroke-width="1" stroke-dasharray="2,3"/>
-
-    <!-- Stylized Vector Gecko -->
-    <g transform="translate(0, 0) scale(0.85)">
-      <!-- S-Curved Tail -->
-      <path d="M 0,8 C 2,14 5,19 9,23 C 13,27 15,31 13,34 C 11,37 7,36 4,33 C 0,29 -2,23 -2,16 C -2,12 -1,9 0,8 Z" fill="url(#geckoGrad)"/>
-
-      <!-- Sleek Torso -->
-      <path d="M 0,-13 C 4.5,-13 6.5,-7 6.5,0 C 6.5,7 4.5,12 0,12 C -4.5,12 -6.5,7 -6.5,0 C -6.5,-7 -4.5,-13 0,-13 Z" fill="url(#geckoGrad)"/>
-
-      <!-- Head with Pointed Snout -->
-      <path d="M 0,-26 C 5.5,-26 8,-20 6.5,-13 C 4,-11 -4,-11 -6.5,-13 C -8,-20 -5.5,-26 0,-26 Z" fill="url(#geckoGrad)"/>
-      <!-- Eyes with Contrast -->
-      <circle cx="-3.5" cy="-19" r="1.8" fill="#064e3b"/>
-      <circle cx="3.5" cy="-19" r="1.8" fill="#064e3b"/>
-      <circle cx="-3.8" cy="-19.3" r="0.6" fill="#a7f3d0"/>
-      <circle cx="3.2" cy="-19.3" r="0.6" fill="#a7f3d0"/>
-
-      <!-- Front Right Leg -->
-      <path d="M 4.5,-9 C 9,-11 14,-14 17,-12 C 18,-10 15,-7 11,-6" fill="none" stroke="url(#geckoGrad)" stroke-width="3" stroke-linecap="round"/>
-      <circle cx="19" cy="-15" r="1.8" fill="#6ee7b7"/>
-      <circle cx="21" cy="-11" r="1.8" fill="#6ee7b7"/>
-      <circle cx="18" cy="-7" r="1.8" fill="#6ee7b7"/>
-
-      <!-- Front Left Leg -->
-      <path d="M -4.5,-9 C -9,-11 -14,-14 -17,-12 C -18,-10 -15,-7 -11,-6" fill="none" stroke="url(#geckoGrad)" stroke-width="3" stroke-linecap="round"/>
-      <circle cx="-19" cy="-15" r="1.8" fill="#6ee7b7"/>
-      <circle cx="-21" cy="-11" r="1.8" fill="#6ee7b7"/>
-      <circle cx="-18" cy="-7" r="1.8" fill="#6ee7b7"/>
-
-      <!-- Back Right Leg -->
-      <path d="M 4.5,6 C 9,8 14,7 18,11 C 19,13 16,16 12,14" fill="none" stroke="url(#geckoGrad)" stroke-width="3" stroke-linecap="round"/>
-      <circle cx="19" cy="8" r="1.8" fill="#6ee7b7"/>
-      <circle cx="22" cy="12" r="1.8" fill="#6ee7b7"/>
-      <circle cx="19" cy="16" r="1.8" fill="#6ee7b7"/>
-
-      <!-- Back Left Leg -->
-      <path d="M -4.5,6 C -9,8 -14,7 -18,11 C -19,13 -16,16 -12,14" fill="none" stroke="url(#geckoGrad)" stroke-width="3" stroke-linecap="round"/>
-      <circle cx="-19" cy="8" r="1.8" fill="#6ee7b7"/>
-      <circle cx="-22" cy="12" r="1.8" fill="#6ee7b7"/>
-      <circle cx="-19" cy="16" r="1.8" fill="#6ee7b7"/>
-
-      <!-- Spine Ridge Accent Dots -->
-      <circle cx="0" cy="-7" r="0.8" fill="#a7f3d0" opacity="0.8"/>
-      <circle cx="0" cy="-2" r="0.9" fill="#a7f3d0" opacity="0.8"/>
-      <circle cx="0" cy="3" r="0.9" fill="#a7f3d0" opacity="0.8"/>
-      <circle cx="0" cy="8" r="0.8" fill="#a7f3d0" opacity="0.8"/>
-    </g>
+  <!-- Center Shield Emblem -->
+  <g transform="translate(450, 190)" filter="url(#dropShadow)">
+    <circle cx="0" cy="0" r="32" fill="#0d1322" stroke="#22c55e" stroke-width="2"/>
+    <circle cx="0" cy="0" r="26" fill="#10b981" fill-opacity="0.12"/>
+    <text x="0" y="1" text-anchor="middle" dominant-baseline="central" font-size="28">🦎</text>
   </g>
 
   <!-- Top Center Brand Title -->
