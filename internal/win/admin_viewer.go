@@ -833,7 +833,13 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 
 		pad := v.scale(14)
 		dotSz := v.scale(9)
-		drawStatusDot(memDC, pad, (barH-dotSz)/2, dotSz, rgb(22, 163, 74))
+		dotCol := rgb(22, 163, 74)
+		if rtt >= 120 {
+			dotCol = rgb(220, 38, 38)
+		} else if rtt >= 50 {
+			dotCol = rgb(217, 119, 6)
+		}
+		drawStatusDot(memDC, pad, (barH-dotSz)/2, dotSz, dotCol)
 
 		procSetTextColor.Call(memDC, rgb(24, 24, 27))
 		leftLimit := v.toolbarBtns[0].rc.Left - v.scale(12)
@@ -1308,6 +1314,24 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			mmi := (*minMaxInfo)(ptr)
 			mmi.PtMinTrackSize.X = v.scale(680)
 			mmi.PtMinTrackSize.Y = v.scale(420)
+		}
+		return 0
+
+	case wmDPIChanged:
+		newDPI := int32(wParam & 0xFFFF)
+		if newDPI >= 72 && newDPI <= 480 && newDPI != v.dpi {
+			v.dpi = newDPI
+			v.initFonts()
+			if lParam != 0 && !v.fullscreen {
+				ptr := *(*unsafe.Pointer)(unsafe.Pointer(&lParam))
+				sug := (*rect)(ptr)
+				procSetWindowPos.Call(hwnd, 0,
+					uintptr(sug.Left), uintptr(sug.Top),
+					uintptr(sug.Right-sug.Left), uintptr(sug.Bottom-sug.Top),
+					0x0004|0x0010,
+				)
+			}
+			procInvalidateRect.Call(hwnd, 0, 0)
 		}
 		return 0
 

@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	"remote-control/internal/clientui"
 	"remote-control/internal/i18n"
 )
 
@@ -68,12 +67,13 @@ const (
 	swShowNoActivate = 4
 	swRestore        = 9
 
-	wmDestroy  = 0x0002
-	wmPaint    = 0x000F
-	wmClose    = 0x0010
-	wmDrawItem = 0x002B
-	wmCommand  = 0x0111
-	wmAppState = 0x8001
+	wmDestroy    = 0x0002
+	wmPaint      = 0x000F
+	wmClose      = 0x0010
+	wmDrawItem   = 0x002B
+	wmCommand    = 0x0111
+	wmDPIChanged = 0x02E0
+	wmAppState   = 0x8001
 
 	bnClicked  = 0
 	odsSelect  = 0x0001
@@ -104,6 +104,25 @@ const (
 	idBtnDeny       = 1002
 	idBtnDisconnect = 1003
 )
+
+// ClientUIState describes the lifecycle state of the Windows client window.
+type ClientUIState int
+
+const (
+	UIStateConnecting ClientUIState = iota
+	UIStateOnline
+	UIStatePrompt
+	UIStateActive
+	UIStateError
+)
+
+// ClientCallbacks holds user action callbacks invoked from the client GUI.
+type ClientCallbacks struct {
+	OnAllow      func()
+	OnDeny       func()
+	OnDisconnect func()
+	OnClose      func()
+}
 
 type rect struct {
 	Left   int32
@@ -170,10 +189,10 @@ type ClientWindow struct {
 	hostname  string
 	logoPNG   []byte
 	strings   i18n.ClientStrings
-	callbacks clientui.Callbacks
+	callbacks ClientCallbacks
 
 	mu        sync.Mutex
-	state     clientui.State
+	state     ClientUIState
 	detail    string
 	hwnd      uintptr
 	btnAllow  uintptr
@@ -196,14 +215,14 @@ var (
 )
 
 // NewClientWindow constructs a ClientWindow instance. Call Run() to start the Win32 message loop.
-func NewClientWindow(hostname string, logoPNG []byte, lang i18n.Lang, cb clientui.Callbacks) *ClientWindow {
+func NewClientWindow(hostname string, logoPNG []byte, lang i18n.Lang, cb ClientCallbacks) *ClientWindow {
 	str := i18n.Client(lang)
 	return &ClientWindow{
 		hostname:  hostname,
 		logoPNG:   logoPNG,
 		strings:   str,
 		callbacks: cb,
-		state:     clientui.StateConnecting,
+		state:     UIStateConnecting,
 		detail:    str.Connecting,
 		dpi:       96,
 		readyCh:   make(chan struct{}),
@@ -216,7 +235,7 @@ func (w *ClientWindow) Ready() <-chan struct{} {
 }
 
 // SetState safely updates the window state from any goroutine.
-func (w *ClientWindow) SetState(st clientui.State, detail string) {
+func (w *ClientWindow) SetState(st ClientUIState, detail string) {
 	w.mu.Lock()
 	w.state = st
 	w.detail = detail
@@ -397,7 +416,7 @@ func (w *ClientWindow) applyStateToControls() {
 		return
 	}
 
-	if st == clientui.StatePrompt {
+	if st == UIStatePrompt {
 		procShowWindow.Call(btnAllow, swShowNormal)
 		procShowWindow.Call(btnDeny, swShowNormal)
 		procShowWindow.Call(btnDisc, swHide)
@@ -420,7 +439,7 @@ func (w *ClientWindow) applyStateToControls() {
 	} else {
 		procShowWindow.Call(btnAllow, swHide)
 		procShowWindow.Call(btnDeny, swHide)
-		if st == clientui.StateActive {
+		if st == UIStateActive {
 			procShowWindow.Call(btnDisc, swShowNormal)
 		} else {
 			procShowWindow.Call(btnDisc, swHide)
@@ -477,18 +496,18 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 	procSelectObject.Call(hdc, w.fontBody)
 
 	switch st {
-	case clientui.StatePrompt:
+	case UIStatePrompt:
 		procSetTextColor.Call(hdc, rgb(24, 24, 27))
 		rcMsg := rect{pad, w.scale(108), cr.Right - pad, w.scale(136)}
 		drawText(hdc, w.strings.PromptMessage, &rcMsg, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-	case clientui.StateActive:
+	case UIStateActive:
 		drawStatusDot(hdc, pad, w.scale(158), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(21, 128, 61))
 		rcTxt := rect{pad + w.scale(18), w.scale(148), cr.Right - w.scale(164), w.scale(178)}
 		drawText(hdc, w.strings.ActiveSession, &rcTxt, dtLeft|dtSingleLn|dtVCenter)
 
-	case clientui.StateOnline:
+	case UIStateOnline:
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(22, 163, 74))
 		procSetTextColor.Call(hdc, rgb(63, 63, 70))
 		txt := detail
@@ -498,13 +517,13 @@ func (w *ClientWindow) paint(hwnd uintptr) {
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, txt, &rcTxt, dtLeft|dtSingleLn|dtVCenter)
 
-	case clientui.StateError:
+	case UIStateError:
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(220, 38, 38))
 		procSetTextColor.Call(hdc, rgb(185, 28, 28))
 		rcTxt := rect{pad + w.scale(18), w.scale(128), cr.Right - pad, w.scale(158)}
 		drawText(hdc, detail, &rcTxt, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-	default: // clientui.StateConnecting
+	default: // UIStateConnecting
 		drawStatusDot(hdc, pad, w.scale(138), w.scale(10), rgb(217, 119, 6))
 		procSetTextColor.Call(hdc, rgb(82, 82, 91))
 		txt := detail
@@ -610,6 +629,35 @@ func clientWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			w.drawButton(dis)
 			return 1
 		}
+
+	case wmDPIChanged:
+		newDPI := int32(wParam & 0xFFFF)
+		if newDPI >= 72 && newDPI <= 480 && newDPI != w.dpi {
+			w.dpi = newDPI
+			w.destroyFonts()
+			w.initFonts()
+			if lParam != 0 {
+				ptr := *(*unsafe.Pointer)(unsafe.Pointer(&lParam))
+				sug := (*rect)(ptr)
+				procSetWindowPos.Call(hwnd, 0,
+					uintptr(sug.Left), uintptr(sug.Top),
+					uintptr(sug.Right-sug.Left), uintptr(sug.Bottom-sug.Top),
+					0x0004|0x0010, // SWP_NOZORDER | SWP_NOACTIVATE
+				)
+			}
+			clientW := w.scale(420)
+			btnY := w.scale(150)
+			btnH := w.scale(38)
+			pad := w.scale(24)
+			gap := w.scale(12)
+			halfW := (clientW - pad*2 - gap) / 2
+			discW := w.scale(128)
+			procSetWindowPos.Call(w.btnAllow, 0, uintptr(pad), uintptr(btnY), uintptr(halfW), uintptr(btnH), 0x0004)
+			procSetWindowPos.Call(w.btnDeny, 0, uintptr(pad+halfW+gap), uintptr(btnY), uintptr(halfW), uintptr(btnH), 0x0004)
+			procSetWindowPos.Call(w.btnDisc, 0, uintptr(clientW-pad-discW), uintptr(w.scale(146)), uintptr(discW), uintptr(w.scale(36)), 0x0004)
+			procInvalidateRect.Call(hwnd, 0, 1)
+		}
+		return 0
 
 	case wmAppState:
 		w.applyStateToControls()

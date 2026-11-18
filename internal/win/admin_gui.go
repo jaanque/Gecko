@@ -14,6 +14,7 @@ import (
 	"remote-control/internal/config"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
+	"remote-control/internal/version"
 )
 
 var (
@@ -56,12 +57,11 @@ const (
 	adminTabServer  = 2
 )
 
-// AdminClientRow holds the display data for one online PC in the Admin list.
+// AdminClientRow holds the display data for one online Windows PC in the Admin list.
 type AdminClientRow struct {
 	ID           string
 	CredentialID string
 	Hostname     string
-	OS           string
 	Username     string
 	Version      string
 	IP           string
@@ -85,7 +85,7 @@ type AdminCallbacks struct {
 	OnClipboard      func(text string)
 	OnSystemAction   func(action string)
 	OnSendFile       func(path string) error
-	OnGenerateClient func(platform string, logoPNG []byte, destPath string) error
+	OnGenerateClient func(logoPNG []byte, lang string, destPath string) error
 	OnSaveServer     func(profile security.RelayProfile) error
 	OnClose          func()
 }
@@ -155,10 +155,11 @@ type AdminWindow struct {
 	ctrlSrvAddr uintptr
 	ctrlSrvKey  uintptr
 
-	// Logo state for "Crear cliente" tab
+	// Builder state for "Crear cliente" tab
 	logoPNG     []byte
 	logoName    string
 	logoPreview *logoGDI
+	clientLang  string // "ca", "es", "en"
 }
 
 var (
@@ -182,6 +183,7 @@ func NewAdminWindow(cfg AdminConfig, cb AdminCallbacks) *AdminWindow {
 		dpi:         96,
 		activeTab:   startTab,
 		hoverIdx:    -1,
+		clientLang:  "ca",
 		readyCh:     make(chan struct{}),
 	}
 }
@@ -361,7 +363,7 @@ func (a *AdminWindow) Run() error {
 	a.cursorHnd, _, _ = procLoadCursorW.Call(0, idcHand)
 
 	className, _ := syscall.UTF16PtrFromString("RemoteAdminMainWindowClass")
-	title, _ := syscall.UTF16PtrFromString("Control Remoto")
+	title, _ := syscall.UTF16PtrFromString("Gecko · Control Remoto v" + strings.TrimPrefix(version.Version, "v"))
 
 	wc := wndClassExW{
 		CbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
@@ -486,7 +488,7 @@ func (a *AdminWindow) createServerControls(parent uintptr) {
 		parent, idSearchBox, a.hInst, 0,
 	)
 	procSendMessageW.Call(a.ctrlSearch, wmSetFont, a.fontBody, 1)
-	if cue, err := syscall.UTF16PtrFromString("Buscar por equipo, usuario, SO o IP..."); err == nil {
+	if cue, err := syscall.UTF16PtrFromString("Buscar por equipo, usuario o IP..."); err == nil {
 		procSendMessageW.Call(a.ctrlSearch, emSetCueBaner, 1, uintptr(unsafe.Pointer(cue)))
 	}
 
@@ -927,14 +929,10 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		textLeft := cardRC.Left + a.scale(38)
 		textRight := statusRC.Left - a.scale(10)
 
-		titleLine := c.Hostname
-		if badge := osDisplayBadge(c.OS); badge != "" {
-			titleLine = fmt.Sprintf("%s  [%s]", c.Hostname, badge)
-		}
 		procSelectObject.Call(memDC, a.fontRow)
 		procSetTextColor.Call(memDC, rgb(24, 24, 27))
 		nameRC := rect{textLeft, ry + a.scale(10), textRight, ry + a.scale(32)}
-		drawText(memDC, titleLine, &nameRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
+		drawText(memDC, c.Hostname, &nameRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 		metaParts := make([]string, 0, 5)
 		if c.Username != "" {
@@ -991,25 +989,11 @@ func filterAdminClients(clients []AdminClientRow, query string) []AdminClientRow
 	for _, c := range clients {
 		if strings.Contains(strings.ToLower(c.Hostname), q) ||
 			strings.Contains(strings.ToLower(c.Username), q) ||
-			strings.Contains(strings.ToLower(c.OS), q) ||
 			strings.Contains(strings.ToLower(c.IP), q) {
 			out = append(out, c)
 		}
 	}
 	return out
-}
-
-func osDisplayBadge(osName string) string {
-	switch strings.ToLower(osName) {
-	case "windows":
-		return "Windows"
-	case "linux":
-		return "Linux"
-	case "macos":
-		return "macOS"
-	default:
-		return ""
-	}
 }
 
 func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch, pad, topY int32, hasProfile bool) {
@@ -1073,16 +1057,53 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch, pad, topY int32, ha
 	lt2 := rect{txtLeft, rowY + a.scale(28), txtRight, rowY + a.scale(50)}
 	drawText(memDC, logoSub, &lt2, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
+	// Client UI language selector row ("Idioma del cliente")
+	langRowY := rowY + boxSz + a.scale(22)
+	drawLine(memDC, innerL, langRowY-a.scale(12), rightEdge, langRowY-a.scale(12), rgb(244, 244, 245))
+
+	procSelectObject.Call(memDC, a.fontTitle)
+	procSetTextColor.Call(memDC, rgb(24, 24, 27))
+	langLblRC := rect{innerL, langRowY, innerL + a.scale(180), langRowY + a.scale(32)}
+	drawText(memDC, "Idioma del cliente", &langLblRC, dtLeft|dtSingleLn|dtVCenter)
+
+	langOpts := []struct {
+		code  string
+		label string
+	}{
+		{"ca", "Català"},
+		{"es", "Español"},
+		{"en", "English"},
+	}
+	pillW := a.scale(78)
+	pillH := a.scale(30)
+	pillGap := a.scale(6)
+	lx := rightEdge - int32(len(langOpts))*pillW - int32(len(langOpts)-1)*pillGap
+	procSelectObject.Call(memDC, a.fontBtn)
+	for _, opt := range langOpts {
+		prc := rect{lx, langRowY + a.scale(1), lx + pillW, langRowY + a.scale(1) + pillH}
+		idx := len(a.hits)
+		a.hits = append(a.hits, adminHitRegion{kind: "lang_" + opt.code, rc: prc})
+		active := a.clientLang == opt.code
+		if active {
+			drawFlatButton(memDC, prc, a.scale(5), rgb(24, 24, 27), rgb(24, 24, 27), rgb(255, 255, 255), opt.label)
+		} else {
+			bg := rgb(255, 255, 255)
+			if a.hoverIdx == idx {
+				bg = rgb(244, 244, 245)
+			}
+			drawFlatButton(memDC, prc, a.scale(5), bg, rgb(212, 212, 216), rgb(24, 24, 27), opt.label)
+		}
+		lx += pillW + pillGap
+	}
+
 	footerH := a.scale(58)
 	footerTop := cardRC.Bottom - footerH
-	if footerTop < rowY+boxSz+a.scale(20) {
-		footerTop = rowY + boxSz + a.scale(20)
+	if footerTop < langRowY+a.scale(48) {
+		footerTop = langRowY + a.scale(48)
 	}
 	drawLine(memDC, cardRC.Left+1, footerTop, cardRC.Right-1, footerTop, rgb(228, 228, 231))
 
-	saveWinW := a.scale(148)
-	saveLinW := a.scale(132)
-	saveGap := a.scale(10)
+	saveWinW := a.scale(196)
 	saveH := a.scale(36)
 	btnTop := footerTop + (footerH-saveH)/2
 
@@ -1090,29 +1111,19 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch, pad, topY int32, ha
 	saveWinIdx := len(a.hits)
 	a.hits = append(a.hits, adminHitRegion{kind: "save_client_win", rc: saveWinRC})
 
-	saveLinRC := rect{saveWinRC.Left - saveGap - saveLinW, btnTop, saveWinRC.Left - saveGap, btnTop + saveH}
-	saveLinIdx := len(a.hits)
-	a.hits = append(a.hits, adminHitRegion{kind: "save_client_linux", rc: saveLinRC})
-
 	if !hasProfile {
 		procSelectObject.Call(memDC, a.fontSmall)
 		procSetTextColor.Call(memDC, rgb(185, 28, 28))
-		fRC := rect{innerL, footerTop, saveLinRC.Left - a.scale(12), footerTop + footerH}
+		fRC := rect{innerL, footerTop, saveWinRC.Left - a.scale(12), footerTop + footerH}
 		drawText(memDC, "Configura el servidor primero", &fRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 	}
-
-	linBg := rgb(255, 255, 255)
-	if a.hoverIdx == saveLinIdx {
-		linBg = rgb(244, 244, 245)
-	}
-	procSelectObject.Call(memDC, a.fontBtn)
-	drawFlatButton(memDC, saveLinRC, a.scale(6), linBg, rgb(212, 212, 216), rgb(24, 24, 27), "Guardar Linux")
 
 	winBg := rgb(24, 24, 27)
 	if a.hoverIdx == saveWinIdx {
 		winBg = rgb(39, 39, 42)
 	}
-	drawFlatButton(memDC, saveWinRC, a.scale(6), winBg, winBg, rgb(255, 255, 255), "Guardar .exe")
+	procSelectObject.Call(memDC, a.fontBtn)
+	drawFlatButton(memDC, saveWinRC, a.scale(6), winBg, winBg, rgb(255, 255, 255), "Guardar ClientRemot.exe")
 }
 
 func (a *AdminWindow) paintServerTab(memDC uintptr, cw, ch int32, hasProfile, relayOK bool, relayDetail string, profile security.RelayProfile) {
@@ -1231,11 +1242,20 @@ func (a *AdminWindow) handleClick(hwnd uintptr, x, y int32) {
 		a.logoName = ""
 		procInvalidateRect.Call(hwnd, 0, 0)
 
-	case "save_client_win":
-		a.handleSaveClient(hwnd, "windows")
+	case "lang_ca":
+		a.clientLang = "ca"
+		procInvalidateRect.Call(hwnd, 0, 0)
 
-	case "save_client_linux":
-		a.handleSaveClient(hwnd, "linux")
+	case "lang_es":
+		a.clientLang = "es"
+		procInvalidateRect.Call(hwnd, 0, 0)
+
+	case "lang_en":
+		a.clientLang = "en"
+		procInvalidateRect.Call(hwnd, 0, 0)
+
+	case "save_client_win":
+		a.handleSaveClient(hwnd)
 
 	case "cancel_pending":
 		a.mu.Lock()
@@ -1336,7 +1356,7 @@ func (a *AdminWindow) handlePickLogo(hwnd uintptr) {
 	procInvalidateRect.Call(hwnd, 0, 0)
 }
 
-func (a *AdminWindow) handleSaveClient(hwnd uintptr, platform string) {
+func (a *AdminWindow) handleSaveClient(hwnd uintptr) {
 	a.mu.Lock()
 	hasProf := a.hasProfile
 	a.mu.Unlock()
@@ -1345,30 +1365,20 @@ func (a *AdminWindow) handleSaveClient(hwnd uintptr, platform string) {
 		return
 	}
 
-	var destPath string
-	var ok bool
-	if platform == "linux" {
-		destPath, ok = ShowSaveLinuxDialog(hwnd, "ClientRemot")
-	} else {
-		destPath, ok = ShowSaveExeDialog(hwnd, "ClientRemot.exe")
-	}
+	destPath, ok := ShowSaveExeDialog(hwnd, "ClientRemot.exe")
 	if !ok || destPath == "" {
 		return
 	}
 
 	if a.callbacks.OnGenerateClient != nil {
-		if err := a.callbacks.OnGenerateClient(platform, a.logoPNG, destPath); err != nil {
+		if err := a.callbacks.OnGenerateClient(a.logoPNG, a.clientLang, destPath); err != nil {
 			ShowMessageBox(hwnd, "Error", err.Error(), true)
 			return
 		}
 	}
 
-	notice := "Guardado: " + filepath.Base(destPath)
-	if platform == "linux" {
-		notice = "Guardado: " + filepath.Base(destPath) + " (en Linux: chmod +x " + filepath.Base(destPath) + ")"
-	}
 	a.mu.Lock()
-	a.noticeText = notice
+	a.noticeText = "Guardado: " + filepath.Base(destPath)
 	a.noticeIsError = false
 	a.mu.Unlock()
 	a.syncServerControls(hwnd)
@@ -1407,6 +1417,29 @@ func adminWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			procInvalidateRect.Call(hwnd, 0, 0)
 			return 0
 		}
+
+	case wmDPIChanged:
+		newDPI := int32(wParam & 0xFFFF)
+		if newDPI >= 72 && newDPI <= 480 && newDPI != a.dpi {
+			a.dpi = newDPI
+			a.destroyFonts()
+			a.initFonts()
+			procSendMessageW.Call(a.ctrlSearch, wmSetFont, a.fontBody, 1)
+			procSendMessageW.Call(a.ctrlSrvAddr, wmSetFont, a.fontMono, 1)
+			procSendMessageW.Call(a.ctrlSrvKey, wmSetFont, a.fontMono, 1)
+			if lParam != 0 {
+				ptr := *(*unsafe.Pointer)(unsafe.Pointer(&lParam))
+				sug := (*rect)(ptr)
+				procSetWindowPos.Call(hwnd, 0,
+					uintptr(sug.Left), uintptr(sug.Top),
+					uintptr(sug.Right-sug.Left), uintptr(sug.Bottom-sug.Top),
+					0x0004|0x0010,
+				)
+			}
+			a.syncServerControls(hwnd)
+			procInvalidateRect.Call(hwnd, 0, 0)
+		}
+		return 0
 
 	case wmSize, wmAdminRefresh:
 		a.syncServerControls(hwnd)
