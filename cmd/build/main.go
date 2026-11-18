@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type buildTarget struct {
@@ -19,7 +20,9 @@ type buildTarget struct {
 }
 
 func main() {
-	arch := flag.String("arch", "amd64", "Arquitectura destino para los binarios (amd64 o arm64)")
+	arch := flag.String("arch", "amd64", "Arquitectura destino para Windows/Linux (amd64 o arm64)")
+	macArch := flag.String("macos-arch", "arm64", "Arquitectura destino para macOS (arm64 o amd64)")
+	ver := flag.String("version", "", "Versión a incrustar en los binarios (ej. 1.0.0)")
 	flag.Parse()
 
 	goarch := strings.TrimSpace(*arch)
@@ -27,6 +30,20 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Arquitectura no soportada: %q (usa amd64 o arm64)\n", goarch)
 		os.Exit(1)
 	}
+	darwinArch := strings.TrimSpace(*macArch)
+	if darwinArch != "amd64" && darwinArch != "arm64" {
+		fmt.Fprintf(os.Stderr, "Arquitectura macOS no soportada: %q (usa arm64 o amd64)\n", darwinArch)
+		os.Exit(1)
+	}
+
+	verLD := ""
+	if v := strings.TrimSpace(*ver); v != "" {
+		verLD += fmt.Sprintf(" -X remote-control/internal/version.Version=%s", v)
+	}
+	if commit := gitShortCommit(); commit != "" {
+		verLD += fmt.Sprintf(" -X remote-control/internal/version.Commit=%s", commit)
+	}
+	verLD += fmt.Sprintf(" -X remote-control/internal/version.Date=%s", time.Now().UTC().Format("2006-01-02"))
 
 	for _, dir := range []string{filepath.Join("cmd", "admin", "assets"), "dist"} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -40,7 +57,7 @@ func main() {
 			label:   "Cliente (Windows)",
 			goos:    "windows",
 			goarch:  goarch,
-			ldflags: "-H=windowsgui -s -w",
+			ldflags: "-H=windowsgui -s -w" + verLD,
 			output:  filepath.Join("cmd", "admin", "assets", "client_template.exe"),
 			pkg:     "./cmd/client",
 		},
@@ -48,23 +65,47 @@ func main() {
 			label:   "Cliente (Linux)",
 			goos:    "linux",
 			goarch:  goarch,
-			ldflags: "-s -w",
+			ldflags: "-s -w" + verLD,
 			output:  filepath.Join("cmd", "admin", "assets", "client_template_linux"),
+			pkg:     "./cmd/client",
+		},
+		{
+			label:   "Cliente (macOS)",
+			goos:    "darwin",
+			goarch:  darwinArch,
+			ldflags: "-s -w" + verLD,
+			output:  filepath.Join("cmd", "admin", "assets", "client_template_darwin"),
 			pkg:     "./cmd/client",
 		},
 		{
 			label:   "Admin (Windows)",
 			goos:    "windows",
 			goarch:  goarch,
-			ldflags: "-H=windowsgui -s -w",
+			ldflags: "-H=windowsgui -s -w" + verLD,
 			output:  filepath.Join("dist", "AdminRemoto.exe"),
+			pkg:     "./cmd/admin",
+		},
+		{
+			label:   "Admin (Linux)",
+			goos:    "linux",
+			goarch:  goarch,
+			ldflags: "-s -w" + verLD,
+			output:  filepath.Join("dist", "AdminRemoto-linux"),
+			pkg:     "./cmd/admin",
+		},
+		{
+			label:   "Admin (macOS)",
+			goos:    "darwin",
+			goarch:  darwinArch,
+			ldflags: "-s -w" + verLD,
+			output:  filepath.Join("dist", "AdminRemoto-macos"),
 			pkg:     "./cmd/admin",
 		},
 		{
 			label:   "Relay (Windows)",
 			goos:    "windows",
 			goarch:  goarch,
-			ldflags: "-s -w",
+			ldflags: "-s -w" + verLD,
 			output:  filepath.Join("dist", "RelayServidor.exe"),
 			pkg:     "./cmd/relay",
 		},
@@ -72,7 +113,7 @@ func main() {
 			label:   "Relay (Linux)",
 			goos:    "linux",
 			goarch:  goarch,
-			ldflags: "-s -w",
+			ldflags: "-s -w" + verLD,
 			output:  filepath.Join("dist", "RelayServidor"),
 			pkg:     "./cmd/relay",
 		},
@@ -97,4 +138,12 @@ func main() {
 	}
 
 	fmt.Println("Compilación completada en dist/")
+}
+
+func gitShortCommit() string {
+	out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

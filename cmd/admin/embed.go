@@ -1,5 +1,3 @@
-//go:build windows
-
 package main
 
 import "embed"
@@ -17,6 +15,14 @@ func embeddedClientTemplate() []byte {
 
 func embeddedLinuxClientTemplate() []byte {
 	data, err := assetFiles.ReadFile("assets/client_template_linux")
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func embeddedDarwinClientTemplate() []byte {
+	data, err := assetFiles.ReadFile("assets/client_template_darwin")
 	if err != nil {
 		return nil
 	}

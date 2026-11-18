@@ -17,6 +17,7 @@ import (
 
 	"remote-control/internal/relay"
 	"remote-control/internal/security"
+	"remote-control/internal/version"
 )
 
 func main() {
@@ -25,6 +26,7 @@ func main() {
 	defaultPublic := envOr("RELAY_PUBLIC_ADDR", "")
 	defaultShowKey := os.Getenv("RELAY_SHOW_KEY") == "1" || strings.EqualFold(os.Getenv("RELAY_SHOW_KEY"), "true")
 
+	showVersion := flag.Bool("version", false, "Mostrar versión y salir")
 	listenAddr := flag.String("listen", defaultListen, "Puerto/dirección TCP TLS 1.3 (ej. :9443)")
 	dataDir := flag.String("data-dir", defaultData, "Carpeta de datos TLS y tokens")
 	publicAddr := flag.String("public-addr", defaultPublic, "Dominio o IP pública (ej. remoto.tudominio.com:9443)")
@@ -33,6 +35,11 @@ func main() {
 	revokeID := flag.String("revoke", "", "Revocar una credencial de cliente por ID (o 'default') y salir")
 	healthcheck := flag.Bool("healthcheck", false, "Comprobar si el puerto del Relay responde localmente y salir")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.Banner("RelayServidor"))
+		return
+	}
 
 	if *healthcheck {
 		if err := runHealthcheck(*listenAddr); err != nil {

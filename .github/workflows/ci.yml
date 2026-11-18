@@ -58,6 +58,13 @@ jobs:
           GOARCH: arm64
         run: go vet ./...
 
+      - name: Vet (macOS arm64)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: darwin
+          GOARCH: arm64
+        run: go vet ./...
+
       - name: Test (Linux)
         run: go test -race -count=1 ./...
 

@@ -3,21 +3,36 @@
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"remote-control/internal/admin"
+	"remote-control/internal/adminweb"
+	"remote-control/internal/i18n"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
+	"remote-control/internal/version"
 	"remote-control/internal/win"
 )
 
 func main() {
-	win.EnableDPIAwareness()
-
+	showVersion := flag.Bool("version", false, "Mostrar versión y salir")
 	dataDir := flag.String("data-dir", "", "Carpeta donde guardar la configuración del servidor puente (por defecto: ./data junto al ejecutable)")
+	webMode := flag.Bool("web", false, "Usar interfaz web local en el navegador en lugar de la ventana Win32")
+	listenAddr := flag.String("listen", "127.0.0.1:0", "Dirección local para el modo -web")
+	langFlag := flag.String("lang", "", "Idioma inicial para el modo -web (ca, es, en)")
+	noBrowser := flag.Bool("no-browser", false, "No abrir el navegador automáticamente en modo -web")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.Banner("AdminRemoto"))
+		return
+	}
 
 	resolvedDataDir := *dataDir
 	if resolvedDataDir == "" {
@@ -29,9 +44,36 @@ func main() {
 	}
 
 	relayClient := admin.NewRelayClient(resolvedDataDir)
-	prof, hasProf := relayClient.Profile()
 	winTemplate := embeddedClientTemplate()
 	linuxTemplate := embeddedLinuxClientTemplate()
+	darwinTemplate := embeddedDarwinClientTemplate()
+
+	if *webMode {
+		srv, err := adminweb.NewServer(relayClient, adminweb.Config{
+			ListenAddr: *listenAddr,
+			OpenURL:    !*noBrowser,
+			DefaultLng: i18n.Normalize(*langFlag, i18n.Detect(i18n.LangCA)),
+			Templates: adminweb.Templates{
+				Windows: winTemplate,
+				Linux:   linuxTemplate,
+				Darwin:  darwinTemplate,
+			},
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error iniciando Admin Web: %v\n", err)
+			os.Exit(1)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := srv.Run(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "Admin Web detenido con error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	win.EnableDPIAwareness()
+	prof, hasProf := relayClient.Profile()
 
 	window := win.NewAdminWindow(win.AdminConfig{
 		HasProfile: hasProf,
@@ -77,6 +119,8 @@ func main() {
 			tmpl := winTemplate
 			if platform == "linux" {
 				tmpl = linuxTemplate
+			} else if platform == "darwin" {
+				tmpl = darwinTemplate
 			}
 			label := filepath.Base(destPath)
 			built, _, err := relayClient.GenerateClientBinaryWithLabel(tmpl, logoPNG, label)
@@ -106,6 +150,7 @@ func main() {
 					Hostname:     c.Hostname,
 					OS:           c.OS,
 					Username:     c.Username,
+					Version:      c.Version,
 					IP:           c.IP,
 					Width:        c.Width,
 					Height:       c.Height,

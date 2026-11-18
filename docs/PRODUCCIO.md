@@ -9,9 +9,11 @@ Aquest document recull els detalls d'arquitectura, compilació, desplegament en 
 | Binari | Plataforma | Funció |
 | :--- | :--- | :--- |
 | `RelayServidor` / `RelayServidor.exe` | Linux (amd64/arm64), Docker (`scratch`), Windows Server | Servidor pont mTLS 1.3, gestió de PKI/revocació, auditoria i enrutament de sessions. |
-| `AdminRemoto.exe` | Windows (amd64/arm64) | Consola d'administració, visor remot natiu Win32 i generador de clients amb logotip. |
-| `ClientRemot.exe` | Windows (amd64/arm64) | Agent portable sense instal·lació (interfície en català). |
-| `ClientRemot` | Linux X11 (amd64/arm64) | Agent portable en Go pur sobre protocol X11 natiu (interfície en català). |
+| `AdminRemoto.exe` | Windows (amd64/arm64) | Consola d'administració nativa Win32 (o consola web local amb `-web`), visor remot i generador de clients. |
+| `AdminRemoto-linux` / `AdminRemoto-macos` | Linux · macOS | Consola d'administració web local (enllaçada a `127.0.0.1` amb token de sessió) i visor HTML5 Canvas. |
+| `ClientRemot.exe` | Windows (amd64/arm64) | Agent portable amb captura GPU **DXGI Desktop Duplication** (+ *fallback* GDI), multiidioma (`ca`/`es`/`en`). |
+| `ClientRemot` | Linux X11 / Wayland | Agent portable amb protocol X11 natiu i suport Wayland (`grim`/`spectacle`/`gnome-screenshot`, `ydotool`, `wl-copy`). |
+| `ClientRemot-macos` | macOS (arm64/amd64) | Agent portable amb `screencapture`, CoreGraphics (`CGEvent`), `pbcopy`/`pbpaste` i diàleg natiu. |
 
 ---
 
@@ -20,11 +22,14 @@ Aquest document recull els detalls d'arquitectura, compilació, desplegament en 
 Requereix **Go 1.22+** (sense `cgo`; funciona des de Windows, Linux o macOS):
 
 ```sh
-# Compilar tots els binaris (amd64 per defecte) a dist/
+# Compilar tots els binaris (Windows/Linux amd64 + macOS arm64) a dist/
 go run ./cmd/build
 
-# Compilar per a arquitectura ARM64
-go run ./cmd/build -arch arm64
+# Compilar amb versió personalitzada o arquitectura ARM64
+go run ./cmd/build -version 1.0.0 -arch arm64 -macos-arch arm64
+
+# Comprovar la versió incrustada de qualsevol binari
+./dist/RelayServidor -version
 
 # Executar tota la bateria de tests amb detector de condicions de cursa
 go test -race -count=1 ./...
@@ -186,31 +191,37 @@ Cada executable generat des de `AdminRemoto.exe` estant connectat al Relay rep u
 ```text
 .
 ├── cmd/
-│   ├── admin/          # Consola i visor natiu de Windows (AdminRemoto.exe)
+│   ├── admin/          # Consola nativa Windows + consola Web local per a Linux/macOS/Windows (-web)
 │   ├── build/          # Compilador multiplataforma en Go pur (go run ./cmd/build)
-│   ├── client/         # Agent client Windows i Linux X11 (ClientRemot)
+│   ├── client/         # Agent client Windows, Linux (X11/Wayland) i macOS
 │   └── relay/          # Servidor pont mTLS 1.3 i CLI d'administració (RelayServidor)
 ├── internal/
 │   ├── admin/          # Client de connexió de l'Admin cap al Relay i enviament de fitxers
+│   ├── adminweb/       # Servidor WebSocket RFC 6455 i UI web multiplataforma embebida
 │   ├── clientui/       # Estats, callbacks i tipus de monitor compartits
 │   ├── config/         # Incrustació/lectura de configuració al binari i normalització de logos
-│   ├── linux/          # Client X11 en Go pur (RANDR, XTEST, XFIXES, UI, Wayland, portapapers)
+│   ├── darwin/         # Backend natiu de client per a macOS (screencapture, CGEvent, pbcopy)
+│   ├── i18n/           # Localització (ca / es / en) i detecció automàtica d'idioma
+│   ├── linux/          # Client X11 natiu i backend Wayland (grim, ydotool, wl-copy, zenity)
 │   ├── protocol/       # Protocol binari/JSON amb validació estricta de tipus i mides
 │   ├── relay/          # Nucli del servidor pont, rate limiting per IP i auditoria
 │   ├── security/       # PKI mTLS 1.3, pinning SHA-256, claus RMT2 i revocació per client
 │   ├── transfer/       # Receptor segur de fitxers amb SHA-256 i prevenció de path traversal
-│   ├── video/          # Codificador i descodificador híbrid de tessel·les 64×64 (Zlib-BGR + JPEG)
-│   └── win/            # Interfície Win32, captura GDI, injecció SendInput/SendSAS i portapapers
+│   ├── version/        # Versió, commit i data incrustats en temps de compilació
+│   ├── video/          # Codificador (amb fast-path dirty rects) i descodificador de tessel·les 64×64
+│   └── win/            # DXGI Desktop Duplication (COM D3D11), GDI fallback, Win32 UI, SendInput/SendSAS
 ├── docs/               # Documentació tècnica i d'operació
 ├── Dockerfile          # Imatge mínima sobre scratch amb HEALTHCHECK
-└── .github/workflows/  # Integració contínua (gofmt, go vet multi-SO, tests i cross-build)
+└── .github/            # CI i plantilles d'Issues / Pull Requests
 ```
 
 ---
 
 ## Resolució de problemes
 
-- **Pantalla negra o avís en Linux (Wayland)**: el client Linux utilitza el protocol X11 natiu (`GetImage` + `XTEST`). Si la sessió corre sobre Wayland, la finestra avisarà automàticament; canvia a sessió **Xorg / X11** a la pantalla d'inici de sessió.
-- **El portapapers no se sincronitza en Linux**: comprova que l'equip remot té instal·lat `xclip` o `xsel` (`sudo apt install xclip`).
-- **Pantalla pausada en aparèixer UAC o pantalla bloquejada en Windows**: per seguretat de Windows, la captura GDI (`BitBlt`) i `SendSAS` des d'un procés d'usuari estàndard no accedeixen a l'escriptori segur (*Secure Desktop*). Cal executar el client com a servei `SYSTEM` amb la política *SoftwareSASGeneration* habilitada.
+- **Linux en sessió Wayland**: en Wayland pur, Gecko fa servir `grim` (Sway/Hyprland/wlroots), `spectacle` (KDE) o `gnome-screenshot` (GNOME) per a captura, `ydotool` per a ratolí/teclat, `wl-copy`/`wl-paste` per al portapapers i `zenity`/`kdialog` per al diàleg de permís. Per a màxima fluïdesa sense eines auxiliars, es recomana una sessió **Xorg / X11**.
+- **Permisos en macOS**: la primera vegada que s'executa `ClientRemot-macos`, cal autoritzar **Enregistrament de pantalla** (*Screen Recording*) i **Accessibilitat** (*Accessibility*) a *Configuració del Sistema → Privadesa i seguretat*.
+- **El portapapers no se sincronitza en Linux**: comprova que l'equip remot té instal·lat `wl-clipboard` (Wayland) o `xclip`/`xsel` (X11).
+- **Captura en Windows (DXGI vs GDI)**: en monitors individuals Windows 8/10/11, Gecko utilitza automàticament **DXGI Desktop Duplication** amb rectangles modificats per GPU per minimitzar l'ús de CPU. En vistes multimonitor completes (`Todos`), sessions RDP o VMs sense GPU, canvia automàticament a GDI `BitBlt`.
+- **Pantalla pausada en aparèixer UAC o pantalla bloquejada en Windows**: per seguretat de Windows, les captures d'usuari estàndard no accedeixen al *Secure Desktop*. Cal executar el client elevat / com a servei `SYSTEM` amb la política *SoftwareSASGeneration* habilitada.
 - **El Relay no mostra la clau en reiniciar**: és intencionat per no deixar la clau mestra als logs. Executa `RelayServidor -show-key` per consultar-la.
