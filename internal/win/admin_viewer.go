@@ -477,7 +477,10 @@ func (v *remoteViewer) decodeLoop(sessionID string, ch <-chan []byte, done <-cha
 		select {
 		case <-done:
 			return
-		case data := <-ch:
+		case data, ok := <-ch:
+			if !ok {
+				return
+			}
 			meta, err := v.fb.ApplyFrame(data)
 			if err != nil {
 				continue
@@ -516,7 +519,10 @@ func (v *remoteViewer) inputLoop(inCh <-chan queuedInput, mvCh <-chan protocol.M
 		select {
 		case <-done:
 			return
-		case item := <-inCh:
+		case item, ok := <-inCh:
+			if !ok {
+				return
+			}
 			if item.isKey {
 				if v.cb.OnKey != nil {
 					v.cb.OnKey(item.key)
@@ -524,7 +530,10 @@ func (v *remoteViewer) inputLoop(inCh <-chan queuedInput, mvCh <-chan protocol.M
 			} else if v.cb.OnMouse != nil {
 				v.cb.OnMouse(item.mouse)
 			}
-		case mv := <-mvCh:
+		case mv, ok := <-mvCh:
+			if !ok {
+				return
+			}
 			if v.cb.OnMouse != nil {
 				v.cb.OnMouse(mv)
 			}
@@ -1474,6 +1483,11 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			go v.cb.OnDisconnect()
 		}
 		v.CloseUI()
+		return 0
+
+	case wmDestroy:
+		v.releaseBackbuffer()
+		v.destroyFonts()
 		return 0
 	}
 

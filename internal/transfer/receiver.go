@@ -119,20 +119,32 @@ func (r *Receiver) WriteChunk(ch protocol.FileChunk) error {
 		return errors.New("transferencia desconocida")
 	}
 	if int64(ch.Offset) != at.received {
+		r.abortLocked(ch.TransferID)
 		return fmt.Errorf("offset fuera de orden: got %d want %d", ch.Offset, at.received)
 	}
 	if at.received+int64(len(ch.Data)) > at.expectedSz {
+		r.abortLocked(ch.TransferID)
 		return errors.New("el archivo excede el tamaño declarado")
 	}
 	if len(ch.Data) == 0 {
 		return nil
 	}
 	if _, err := at.file.Write(ch.Data); err != nil {
+		r.abortLocked(ch.TransferID)
 		return err
 	}
 	_, _ = at.hasher.Write(ch.Data)
 	at.received += int64(len(ch.Data))
 	return nil
+}
+
+func (r *Receiver) abortLocked(id string) {
+	at, ok := r.active[id]
+	if ok {
+		delete(r.active, id)
+		_ = at.file.Close()
+		_ = os.Remove(at.partPath)
+	}
 }
 
 // Finish verifies exact byte count and SHA-256 checksum, then atomically moves the file

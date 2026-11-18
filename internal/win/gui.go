@@ -705,6 +705,7 @@ func clientWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case wmDestroy:
 		removeClipboardListener(hwnd)
+		w.destroyFonts()
 		procPostQuitMessage.Call(0)
 		return 0
 	}

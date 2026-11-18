@@ -140,6 +140,7 @@ type TileEncoder struct {
 	jobs    []tileJob
 	results []encodedTile
 	outBuf  bytes.Buffer
+	visited []bool
 }
 
 // NewTileEncoder constructs a reusable multi-core TileEncoder.
@@ -207,7 +208,14 @@ func (e *TileEncoder) EncodeDirtyRects(frameID uint32, currBGRA []byte, w, h, qu
 	if !sendAll && len(dirtyRects) > 0 {
 		cols := (w + tileSize - 1) / tileSize
 		rows := (h + tileSize - 1) / tileSize
-		visited := make([]bool, cols*rows)
+		need := cols * rows
+		if cap(e.visited) < need {
+			e.visited = make([]bool, need)
+		} else {
+			e.visited = e.visited[:need]
+			clear(e.visited)
+		}
+		visited := e.visited
 		screenBounds := image.Rect(0, 0, w, h)
 		for _, r := range dirtyRects {
 			clamped := r.Intersect(screenBounds)
