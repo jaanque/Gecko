@@ -173,7 +173,18 @@ func main() {
 		OnSessionDenied: func(_, _, hostname, reason string) {
 			window.NotifyDenied(hostname, reason)
 		},
-		OnSessionEnded: func(_, hostname, reason string) {
+		OnSessionEnded: func(sessionID, hostname, reason string) {
+			logSessionEvent(sessionID, hostname, reason)
+			clientMu.Lock()
+			for id, row := range knownClients {
+				if row.Hostname == hostname && row.Status == "active" {
+					row.Status = "offline"
+					knownClients[id] = row
+				}
+			}
+			rows := buildClientRows()
+			clientMu.Unlock()
+			window.UpdateClients(rows)
 			window.NotifyEnded(hostname, reason)
 		},
 		OnSessionError: func(reason string) {
