@@ -48,4 +48,13 @@ func TestMouseAndKeyEncoding(t *testing.T) {
 	if k != k2 {
 		t.Fatalf("key mismatch: got %+v, want %+v", k2, k)
 	}
+
+	ack := FrameAck{FrameID: 42, SentUnixNano: 1700000000123456789}
+	ack2, err := DecodeFrameAck(EncodeFrameAck(ack))
+	if err != nil {
+		t.Fatalf("DecodeFrameAck failed: %v", err)
+	}
+	if ack != ack2 {
+		t.Fatalf("ack mismatch: got %+v, want %+v", ack2, ack)
+	}
 }

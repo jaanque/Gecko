@@ -24,9 +24,24 @@ const (
 	MsgSessionStop  uint8 = 0x12
 	MsgStreamConfig uint8 = 0x13
 	MsgFrame        uint8 = 0x20
+	MsgFrameAck     uint8 = 0x21
 	MsgMouse        uint8 = 0x30
 	MsgKey          uint8 = 0x31
 )
+
+// Tile codecs used inside MsgFrame payloads.
+const (
+	TileCodecJPEG    uint8 = 0
+	TileCodecZlibBGR uint8 = 1
+)
+
+// FrameHeaderSize is the binary header size of MsgFrame:
+// frameID(4) + sentUnixNano(8) + width(2) + height(2) + tileCount(2).
+const FrameHeaderSize = 18
+
+// TileHeaderSize is the binary header size per tile inside MsgFrame:
+// x(2) + y(2) + w(2) + h(2) + codec(1) + dataLen(4).
+const TileHeaderSize = 13
 
 // Mouse actions.
 const (
@@ -42,6 +57,8 @@ const (
 	ButtonLeft   uint8 = 0
 	ButtonRight  uint8 = 1
 	ButtonMiddle uint8 = 2
+	ButtonX1     uint8 = 3
+	ButtonX2     uint8 = 4
 )
 
 // Key actions.
@@ -122,6 +139,31 @@ type KeyEvent struct {
 	VK     uint16
 	Scan   uint16 // hardware scan code or UTF-16 code unit for KeyUnicode
 	Flags  uint8
+}
+
+// FrameAck acknowledges a rendered frame for sliding-window backpressure and RTT measurement.
+type FrameAck struct {
+	FrameID      uint32
+	SentUnixNano int64
+}
+
+// EncodeFrameAck serializes a FrameAck into 12 bytes.
+func EncodeFrameAck(ack FrameAck) []byte {
+	buf := make([]byte, 12)
+	binary.BigEndian.PutUint32(buf[0:4], ack.FrameID)
+	binary.BigEndian.PutUint64(buf[4:12], uint64(ack.SentUnixNano))
+	return buf
+}
+
+// DecodeFrameAck parses a 12-byte FrameAck payload.
+func DecodeFrameAck(b []byte) (FrameAck, error) {
+	if len(b) != 12 {
+		return FrameAck{}, fmt.Errorf("invalid frame ack size: %d", len(b))
+	}
+	return FrameAck{
+		FrameID:      binary.BigEndian.Uint32(b[0:4]),
+		SentUnixNano: int64(binary.BigEndian.Uint64(b[4:12])),
+	}, nil
 }
 
 // EncodeMouse serializes a MouseEvent to 8 bytes.

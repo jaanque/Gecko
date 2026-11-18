@@ -4,12 +4,18 @@ package win
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
 	"image"
 	"image/jpeg"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
+
+	"remote-control/internal/protocol"
 )
 
 var (
@@ -45,7 +51,7 @@ const (
 	cursorShowing = 0x00000001
 	diNormal      = 0x0003
 
-	tileSize = 128
+	tileSize = 64
 )
 
 type bitmapInfoHeader struct {
@@ -87,14 +93,125 @@ type iconInfo struct {
 	HbmColor uintptr
 }
 
-// ScreenSize returns the current virtual desktop width and height in physical pixels.
-func ScreenSize() (int, int) {
-	w, _, _ := procGetSystemMetrics.Call(smCXVirtualScreen)
-	h, _, _ := procGetSystemMetrics.Call(smCYVirtualScreen)
-	return int(int32(w)), int(int32(h))
+type tileJob struct {
+	tx, ty, tw, th int
 }
 
-// ScreenCapturer captures a specific Windows monitor or the full virtual desktop with dirty-tile JPEG diffing.
+type encodedTile struct {
+	tx, ty, tw, th uint16
+	codec          uint8
+	data           []byte
+}
+
+type tileEncoderWorker struct {
+	tileRGBA *image.RGBA
+	bgrBuf   []byte
+	compBuf  bytes.Buffer
+	zw       *zlib.Writer
+}
+
+func newTileEncoderWorker() *tileEncoderWorker {
+	w := &tileEncoderWorker{
+		tileRGBA: image.NewRGBA(image.Rect(0, 0, tileSize, tileSize)),
+		bgrBuf:   make([]byte, tileSize*tileSize*3),
+	}
+	w.zw, _ = zlib.NewWriterLevel(&w.compBuf, zlib.BestSpeed)
+	return w
+}
+
+func (w *tileEncoderWorker) encode(currBGRA []byte, stride int, job tileJob, quality int) (encodedTile, bool) {
+	tx, ty, tw, th := job.tx, job.ty, job.tw, job.th
+
+	// In Estándar (78) and Alta (92) modes, encode crisp UI/text tiles losslessly via fast Zlib-BGR
+	// so small text and ClearType edges stay 100% razor-sharp without JPEG chroma blur.
+	if quality >= 70 && isCrispUITile(currBGRA, stride, tx, ty, tw, th) {
+		bgr := w.bgrBuf[:tw*th*3]
+		p := 0
+		for row := 0; row < th; row++ {
+			srcOff := (ty+row)*stride + tx*4
+			srcRow := currBGRA[srcOff : srcOff+tw*4]
+			for i := 0; i < tw*4; i += 4 {
+				bgr[p+0] = srcRow[i+0] // B
+				bgr[p+1] = srcRow[i+1] // G
+				bgr[p+2] = srcRow[i+2] // R
+				p += 3
+			}
+		}
+
+		w.compBuf.Reset()
+		w.zw.Reset(&w.compBuf)
+		_, err1 := w.zw.Write(bgr)
+		err2 := w.zw.Close()
+		if err1 == nil && err2 == nil {
+			comp := w.compBuf.Bytes()
+			// Only keep lossless if it actually compresses cleanly (flat UI/text tiles compress to < 1.8 B/px).
+			if len(comp) > 0 && len(comp) <= (tw*th*9)/5 {
+				out := make([]byte, len(comp))
+				copy(out, comp)
+				return encodedTile{
+					tx: uint16(tx), ty: uint16(ty), tw: uint16(tw), th: uint16(th),
+					codec: protocol.TileCodecZlibBGR,
+					data:  out,
+				}, true
+			}
+		}
+	}
+
+	// Photographic / video / motion tiles -> fast JPEG.
+	subImg := w.tileRGBA.SubImage(image.Rect(0, 0, tw, th)).(*image.RGBA)
+	for row := 0; row < th; row++ {
+		srcOff := (ty+row)*stride + tx*4
+		dstOff := row * subImg.Stride
+		srcRow := currBGRA[srcOff : srcOff+tw*4]
+		dstRow := subImg.Pix[dstOff : dstOff+tw*4]
+		for i := 0; i < tw*4; i += 4 {
+			dstRow[i+0] = srcRow[i+2] // R
+			dstRow[i+1] = srcRow[i+1] // G
+			dstRow[i+2] = srcRow[i+0] // B
+			dstRow[i+3] = 255
+		}
+	}
+
+	w.compBuf.Reset()
+	if err := jpeg.Encode(&w.compBuf, subImg, &jpeg.Options{Quality: quality}); err != nil {
+		return encodedTile{}, false
+	}
+	jpg := w.compBuf.Bytes()
+	out := make([]byte, len(jpg))
+	copy(out, jpg)
+	return encodedTile{
+		tx: uint16(tx), ty: uint16(ty), tw: uint16(tw), th: uint16(th),
+		codec: protocol.TileCodecJPEG,
+		data:  out,
+	}, true
+}
+
+// isCrispUITile checks in microseconds whether a tile looks like crisp UI/text
+// (high horizontal pixel-run coherence typical of editors, documents, menus, and ClearType text).
+func isCrispUITile(bgra []byte, stride, tx, ty, tw, th int) bool {
+	if tw < 4 || th < 4 {
+		return false
+	}
+	same := 0
+	total := 0
+	for row := 0; row < th; row += 2 {
+		off := (ty+row)*stride + tx*4
+		prevB, prevG, prevR := bgra[off], bgra[off+1], bgra[off+2]
+		for x := 1; x < tw; x++ {
+			o := off + x*4
+			b, g, r := bgra[o], bgra[o+1], bgra[o+2]
+			if b == prevB && g == prevG && r == prevR {
+				same++
+			}
+			prevB, prevG, prevR = b, g, r
+			total++
+		}
+	}
+	return total > 0 && same*100 >= total*48
+}
+
+// ScreenCapturer captures a specific Windows monitor or the full virtual desktop
+// using parallel 64x64 hybrid lossless-UI + JPEG tile encoding.
 type ScreenCapturer struct {
 	hdcMem   uintptr
 	hBitmap  uintptr
@@ -107,15 +224,27 @@ type ScreenCapturer struct {
 	prevBGRA []byte
 	hasPrev  bool
 
-	tileRGBA *image.RGBA
-	jpegBuf  bytes.Buffer
-	outBuf   bytes.Buffer
+	workers []*tileEncoderWorker
+	jobs    []tileJob
+	results []encodedTile
+	outBuf  bytes.Buffer
 }
 
-// NewScreenCapturer constructs a reusable ScreenCapturer.
+// NewScreenCapturer constructs a reusable multi-core ScreenCapturer.
 func NewScreenCapturer() *ScreenCapturer {
+	n := runtime.NumCPU()
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	workers := make([]*tileEncoderWorker, n)
+	for i := range workers {
+		workers[i] = newTileEncoderWorker()
+	}
 	return &ScreenCapturer{
-		tileRGBA: image.NewRGBA(image.Rect(0, 0, tileSize, tileSize)),
+		workers: workers,
 	}
 }
 
@@ -180,10 +309,10 @@ func (sc *ScreenCapturer) ensureSurface(hdcScreen uintptr, w, h int) error {
 }
 
 // CaptureFrame captures the selected monitor (0 = Monitor 1, -1 = all monitors) and returns
-// an encoded MsgFrame payload containing only changed tiles. Returns nil payload if unchanged.
-func (sc *ScreenCapturer) CaptureFrame(monitorIndex int, quality int, forceFull bool) ([]byte, int, int, error) {
-	if quality < 30 {
-		quality = 30
+// an encoded MsgFrame payload containing only changed 64x64 tiles. Returns nil payload if unchanged.
+func (sc *ScreenCapturer) CaptureFrame(frameID uint32, sentUnixNano int64, monitorIndex, quality int, forceFull bool) ([]byte, int, int, error) {
+	if quality < 35 {
+		quality = 35
 	}
 	if quality > 95 {
 		quality = 95
@@ -248,14 +377,7 @@ func (sc *ScreenCapturer) CaptureFrame(monitorIndex int, quality int, forceFull 
 	sendAll := forceFull || !sc.hasPrev
 	stride := w * 4
 
-	sc.outBuf.Reset()
-	// Reserve 6-byte frame header: width(2), height(2), tileCount(2).
-	var frameHdr [6]byte
-	sc.outBuf.Write(frameHdr[:])
-
-	var tileCount uint16
-	opts := &jpeg.Options{Quality: quality}
-
+	sc.jobs = sc.jobs[:0]
 	for ty := 0; ty < h; ty += tileSize {
 		th := tileSize
 		if ty+th > h {
@@ -266,57 +388,101 @@ func (sc *ScreenCapturer) CaptureFrame(monitorIndex int, quality int, forceFull 
 			if tx+tw > w {
 				tw = w - tx
 			}
-			if !sendAll && !tileChanged(sc.currBGRA, sc.prevBGRA, stride, tx, ty, tw, th) {
-				continue
+			if sendAll || tileChanged(sc.currBGRA, sc.prevBGRA, stride, tx, ty, tw, th) {
+				sc.jobs = append(sc.jobs, tileJob{tx: tx, ty: ty, tw: tw, th: th})
 			}
-
-			// Copy tile BGRA -> RGBA into reusable tile image.
-			subImg := sc.tileRGBA.SubImage(image.Rect(0, 0, tw, th)).(*image.RGBA)
-			for row := 0; row < th; row++ {
-				srcOff := (ty+row)*stride + tx*4
-				dstOff := row * subImg.Stride
-				srcRow := sc.currBGRA[srcOff : srcOff+tw*4]
-				dstRow := subImg.Pix[dstOff : dstOff+tw*4]
-				for i := 0; i < tw*4; i += 4 {
-					dstRow[i+0] = srcRow[i+2] // R
-					dstRow[i+1] = srcRow[i+1] // G
-					dstRow[i+2] = srcRow[i+0] // B
-					dstRow[i+3] = 255         // A
-				}
-			}
-
-			sc.jpegBuf.Reset()
-			if err := jpeg.Encode(&sc.jpegBuf, subImg, opts); err != nil {
-				continue
-			}
-			jpg := sc.jpegBuf.Bytes()
-
-			var thdr [12]byte
-			binary.BigEndian.PutUint16(thdr[0:2], uint16(tx))
-			binary.BigEndian.PutUint16(thdr[2:4], uint16(ty))
-			binary.BigEndian.PutUint16(thdr[4:6], uint16(tw))
-			binary.BigEndian.PutUint16(thdr[6:8], uint16(th))
-			binary.BigEndian.PutUint32(thdr[8:12], uint32(len(jpg)))
-			sc.outBuf.Write(thdr[:])
-			sc.outBuf.Write(jpg)
-			tileCount++
 		}
 	}
 
-	// Swap current & previous buffers.
+	// Swap buffers so prevBGRA always holds the latest captured screen.
+	curr := sc.currBGRA
 	sc.currBGRA, sc.prevBGRA = sc.prevBGRA, sc.currBGRA
 	sc.hasPrev = true
 
-	if tileCount == 0 {
+	jobCount := len(sc.jobs)
+	if jobCount == 0 {
+		return nil, w, h, nil
+	}
+
+	if cap(sc.results) < jobCount {
+		sc.results = make([]encodedTile, jobCount)
+	} else {
+		sc.results = sc.results[:jobCount]
+	}
+
+	// Encode dirty tiles in parallel when multiple tiles changed.
+	if jobCount <= 3 || len(sc.workers) == 1 {
+		worker := sc.workers[0]
+		for i, job := range sc.jobs {
+			if enc, ok := worker.encode(curr, stride, job, quality); ok {
+				sc.results[i] = enc
+			} else {
+				sc.results[i] = encodedTile{}
+			}
+		}
+	} else {
+		workerCount := len(sc.workers)
+		if workerCount > jobCount {
+			workerCount = jobCount
+		}
+		var nextIdx atomic.Int64
+		var wg sync.WaitGroup
+		wg.Add(workerCount)
+		for wi := 0; wi < workerCount; wi++ {
+			worker := sc.workers[wi]
+			go func() {
+				defer wg.Done()
+				for {
+					idx := int(nextIdx.Add(1) - 1)
+					if idx >= jobCount {
+						return
+					}
+					if enc, ok := worker.encode(curr, stride, sc.jobs[idx], quality); ok {
+						sc.results[idx] = enc
+					} else {
+						sc.results[idx] = encodedTile{}
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	// Serialize frame packet.
+	sc.outBuf.Reset()
+	var frameHdr [protocol.FrameHeaderSize]byte
+	sc.outBuf.Write(frameHdr[:])
+
+	var validTiles uint16
+	var thdr [protocol.TileHeaderSize]byte
+	for i := range sc.results {
+		t := &sc.results[i]
+		if len(t.data) == 0 {
+			continue
+		}
+		binary.BigEndian.PutUint16(thdr[0:2], t.tx)
+		binary.BigEndian.PutUint16(thdr[2:4], t.ty)
+		binary.BigEndian.PutUint16(thdr[4:6], t.tw)
+		binary.BigEndian.PutUint16(thdr[6:8], t.th)
+		thdr[8] = t.codec
+		binary.BigEndian.PutUint32(thdr[9:13], uint32(len(t.data)))
+		sc.outBuf.Write(thdr[:])
+		sc.outBuf.Write(t.data)
+		t.data = nil // release reference promptly
+		validTiles++
+	}
+
+	if validTiles == 0 {
 		return nil, w, h, nil
 	}
 
 	raw := sc.outBuf.Bytes()
-	binary.BigEndian.PutUint16(raw[0:2], uint16(w))
-	binary.BigEndian.PutUint16(raw[2:4], uint16(h))
-	binary.BigEndian.PutUint16(raw[4:6], tileCount)
+	binary.BigEndian.PutUint32(raw[0:4], frameID)
+	binary.BigEndian.PutUint64(raw[4:12], uint64(sentUnixNano))
+	binary.BigEndian.PutUint16(raw[12:14], uint16(w))
+	binary.BigEndian.PutUint16(raw[14:16], uint16(h))
+	binary.BigEndian.PutUint16(raw[16:18], validTiles)
 
-	// Return an owned copy so the caller can send asynchronously without races.
 	result := make([]byte, len(raw))
 	copy(result, raw)
 	return result, w, h, nil

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ type HubEvents struct {
 	OnSessionDenied  func(sessionID, clientID, hostname, reason string)
 	OnSessionEnded   func(sessionID, hostname, reason string)
 	OnFrame          func(sessionID string, frameData []byte)
+	OnLatency        func(rttMs int)
 }
 
 type agentConn struct {
@@ -167,6 +169,11 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 	defer rawConn.Close()
 
 	if tlsConn, ok := rawConn.(*tls.Conn); ok {
+		if tc, ok := tlsConn.NetConn().(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+			_ = tc.SetReadBuffer(512 * 1024)
+			_ = tc.SetWriteBuffer(256 * 1024)
+		}
 		_ = tlsConn.SetDeadline(time.Now().Add(10 * time.Second))
 		if err := tlsConn.Handshake(); err != nil {
 			return
@@ -243,6 +250,26 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 		log.Printf("[cliente] desconectado: %s (%s)", agent.hostname, agent.ip)
 	}()
 
+	// Periodic RTT probe while this agent is in an active session.
+	pingDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		var ts [8]byte
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ticker.C:
+				if h.activeAgent() == agent {
+					binary.BigEndian.PutUint64(ts[:], uint64(time.Now().UnixNano()))
+					_ = agent.writeMessage(protocol.MsgPing, ts[:])
+				}
+			}
+		}
+	}()
+	defer close(pingDone)
+
 	for {
 		_ = rawConn.SetReadDeadline(time.Now().Add(35 * time.Second))
 		mType, data, err := protocol.ReadMessage(rawConn)
@@ -255,7 +282,19 @@ func (h *Hub) handleAgentConn(rawConn net.Conn) {
 			_ = agent.writeMessage(protocol.MsgPong, data)
 
 		case protocol.MsgPong:
-			// keepalive ok
+			if len(data) == 8 && h.activeAgent() == agent {
+				sent := int64(binary.BigEndian.Uint64(data))
+				rttMs := int((time.Now().UnixNano() - sent) / int64(time.Millisecond))
+				if rttMs < 0 {
+					rttMs = 0
+				}
+				h.mu.RLock()
+				cb := h.events.OnLatency
+				h.mu.RUnlock()
+				if cb != nil {
+					cb(rttMs)
+				}
+			}
 
 		case protocol.MsgConsentResp:
 			var resp protocol.ConsentRespPayload
@@ -444,6 +483,18 @@ func (h *Hub) DisconnectSession(reason string) {
 		})
 	}
 	h.notifyClients()
+}
+
+// SendFrameAck acknowledges a decoded frame so the client's sliding window advances smoothly.
+func (h *Hub) SendFrameAck(frameID uint32, sentUnixNano int64) {
+	agent := h.activeAgent()
+	if agent == nil {
+		return
+	}
+	_ = agent.writeMessage(protocol.MsgFrameAck, protocol.EncodeFrameAck(protocol.FrameAck{
+		FrameID:      frameID,
+		SentUnixNano: sentUnixNano,
+	}))
 }
 
 // SendMouse forwards a mouse event to the active remote client.

@@ -77,6 +77,9 @@ func main() {
 		OnKey: func(ev protocol.KeyEvent) {
 			hub.SendKey(ev)
 		},
+		OnFrameAck: func(frameID uint32, sentUnixNano int64) {
+			hub.SendFrameAck(frameID, sentUnixNano)
+		},
 		OnQuality: func(quality int) {
 			hub.SendStreamConfig(quality, true)
 		},
@@ -126,6 +129,9 @@ func main() {
 		},
 		OnFrame: func(sessionID string, frameData []byte) {
 			window.PushFrame(sessionID, frameData)
+		},
+		OnLatency: func(rttMs int) {
+			window.SetLatency(rttMs)
 		},
 	})
 

@@ -63,6 +63,7 @@ type AdminCallbacks struct {
 	OnDisconnect     func()
 	OnMouse          func(ev protocol.MouseEvent)
 	OnKey            func(ev protocol.KeyEvent)
+	OnFrameAck       func(frameID uint32, sentUnixNano int64)
 	OnQuality        func(quality int)
 	OnSelectMonitor  func(monitorIndex int)
 	OnGenerateClient func(serverAddr string, logoPNG []byte, destPath string) error
@@ -249,6 +250,16 @@ func (a *AdminWindow) PushFrame(sessionID string, frame []byte) {
 	}
 }
 
+// SetLatency updates the measured round-trip latency (ms) in the viewer toolbar.
+func (a *AdminWindow) SetLatency(rttMs int) {
+	a.mu.Lock()
+	v := a.viewer
+	a.mu.Unlock()
+	if v != nil {
+		v.SetLatency(rttMs)
+	}
+}
+
 // Run creates the native desktop Admin window and runs the Win32 message loop until closed.
 func (a *AdminWindow) Run() error {
 	runtime.LockOSThread()
@@ -300,6 +311,7 @@ func (a *AdminWindow) Run() error {
 	v := newRemoteViewer(hInst, ViewerCallbacks{
 		OnMouse:         a.callbacks.OnMouse,
 		OnKey:           a.callbacks.OnKey,
+		OnFrameAck:      a.callbacks.OnFrameAck,
 		OnQuality:       a.callbacks.OnQuality,
 		OnSelectMonitor: a.callbacks.OnSelectMonitor,
 		OnDisconnect:    a.callbacks.OnDisconnect,

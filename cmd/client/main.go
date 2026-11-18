@@ -35,9 +35,12 @@ type clientAgent struct {
 	promptTimer  *time.Timer
 	streamCancel context.CancelFunc
 
-	quality       atomic.Int32
-	monitorIdx    atomic.Int32 // 0 = Monitor 1 (default), 1..N-1 = other monitors, -1 = all monitors
-	forceKeyframe atomic.Bool
+	quality          atomic.Int32
+	monitorIdx       atomic.Int32 // 0 = Monitor 1 (default), 1..N-1 = other monitors, -1 = all monitors
+	forceKeyframe    atomic.Bool
+	lastSentFrameID  atomic.Uint32
+	lastAckedFrameID atomic.Uint32
+	ackWakeCh        chan struct{}
 }
 
 func main() {
@@ -67,11 +70,12 @@ func main() {
 	defer cancel()
 
 	agent := &clientAgent{
-		cfg:      cfg,
-		hostname: hostname,
-		injector: win.NewInputInjector(),
+		cfg:       cfg,
+		hostname:  hostname,
+		injector:  win.NewInputInjector(),
+		ackWakeCh: make(chan struct{}, 1),
 	}
-	agent.quality.Store(65)
+	agent.quality.Store(78)
 
 	window := win.NewClientWindow(hostname, cfg.LogoPNG, win.ClientCallbacks{
 		OnAllow:      agent.onUserAllow,
@@ -156,6 +160,12 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+
+	if tc, ok := conn.NetConn().(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetWriteBuffer(512 * 1024)
+		_ = tc.SetReadBuffer(256 * 1024)
+	}
 
 	// Close connection immediately if context is canceled.
 	doneConn := make(chan struct{})
@@ -270,6 +280,23 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 				}
 				if sc.Keyframe {
 					a.forceKeyframe.Store(true)
+				}
+			}
+
+		case protocol.MsgFrameAck:
+			if ack, err := protocol.DecodeFrameAck(data); err == nil {
+				for {
+					cur := a.lastAckedFrameID.Load()
+					if int32(ack.FrameID-cur) <= 0 {
+						break
+					}
+					if a.lastAckedFrameID.CompareAndSwap(cur, ack.FrameID) {
+						break
+					}
+				}
+				select {
+				case a.ackWakeCh <- struct{}{}:
+				default:
 				}
 			}
 
@@ -495,31 +522,54 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 	capturer := win.NewScreenCapturer()
 	defer capturer.Close()
 
-	// Target up to ~25 FPS, self-throttling naturally with capture & network speed.
-	const frameInterval = 40 * time.Millisecond
+	a.lastSentFrameID.Store(0)
+	a.lastAckedFrameID.Store(0)
+
+	// Target up to ~60 FPS on fast links, bounded by 2-frame sliding-window ACK backpressure.
+	const (
+		frameInterval = 16 * time.Millisecond
+		maxInFlight   = 2
+	)
+
+	var frameSeq uint32
 
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		start := time.Now()
 
+		// Sliding-window pacing: never let more than 2 frames queue in TCP buffers.
+		if int32(a.lastSentFrameID.Load()-a.lastAckedFrameID.Load()) >= maxInFlight {
+			select {
+			case <-ctx.Done():
+				return
+			case <-a.ackWakeCh:
+			case <-time.After(300 * time.Millisecond):
+				// Safety fallback in case an ACK was delayed.
+				a.lastAckedFrameID.Store(a.lastSentFrameID.Load())
+			}
+		}
+
+		start := time.Now()
 		q := int(a.quality.Load())
 		monIdx := int(a.monitorIdx.Load())
 		force := a.forceKeyframe.Swap(false)
 
-		frame, _, _, err := capturer.CaptureFrame(monIdx, q, force)
+		nextID := frameSeq + 1
+		frame, _, _, err := capturer.CaptureFrame(nextID, start.UnixNano(), monIdx, q, force)
 		if err != nil {
 			// E.g. temporary UAC/lock screen; wait briefly and retry.
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(200 * time.Millisecond):
 				continue
 			}
 		}
 
 		if len(frame) > 0 {
+			frameSeq = nextID
+			a.lastSentFrameID.Store(frameSeq)
 			if err := a.writeMessage(conn, protocol.MsgFrame, frame); err != nil {
 				a.handleRemoteSessionStop(sid)
 				return
@@ -528,8 +578,8 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 
 		elapsed := time.Since(start)
 		wait := frameInterval - elapsed
-		if wait < 5*time.Millisecond {
-			wait = 5 * time.Millisecond
+		if wait < 2*time.Millisecond {
+			wait = 2 * time.Millisecond
 		}
 		select {
 		case <-ctx.Done():

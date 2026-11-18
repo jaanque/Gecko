@@ -28,10 +28,15 @@ const (
 	mouseEventfRightUp     = 0x0010
 	mouseEventfMiddleDown  = 0x0020
 	mouseEventfMiddleUp    = 0x0040
+	mouseEventfXDown       = 0x0080
+	mouseEventfXUp         = 0x0100
 	mouseEventfWheel       = 0x0800
 	mouseEventfHWheel      = 0x1000
 	mouseEventfVirtualDesk = 0x4000
 	mouseEventfAbsolute    = 0x8000
+
+	xButton1 = 0x0001
+	xButton2 = 0x0002
 
 	keyEventfExtendedKey = 0x0001
 	keyEventfKeyUp       = 0x0002
@@ -66,9 +71,13 @@ func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent, monitorIndex int) 
 	case protocol.MouseMove:
 		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk
 	case protocol.MouseDown:
-		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk | buttonDownFlag(ev.Button)
+		fl, md := buttonDownFlags(ev.Button)
+		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk | fl
+		pkt.MouseData = md
 	case protocol.MouseUp:
-		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk | buttonUpFlag(ev.Button)
+		fl, md := buttonUpFlags(ev.Button)
+		pkt.DwFlags = mouseEventfMove | mouseEventfAbsolute | mouseEventfVirtualDesk | fl
+		pkt.MouseData = md
 	case protocol.MouseWheel:
 		pkt.DwFlags = mouseEventfWheel
 		pkt.MouseData = uint32(int32(ev.Delta))
@@ -194,24 +203,32 @@ func (inj *InputInjector) ReleaseAllKeys() {
 	}
 }
 
-func buttonDownFlag(btn uint8) uint32 {
+func buttonDownFlags(btn uint8) (uint32, uint32) {
 	switch btn {
 	case protocol.ButtonRight:
-		return mouseEventfRightDown
+		return mouseEventfRightDown, 0
 	case protocol.ButtonMiddle:
-		return mouseEventfMiddleDown
+		return mouseEventfMiddleDown, 0
+	case protocol.ButtonX1:
+		return mouseEventfXDown, xButton1
+	case protocol.ButtonX2:
+		return mouseEventfXDown, xButton2
 	default:
-		return mouseEventfLeftDown
+		return mouseEventfLeftDown, 0
 	}
 }
 
-func buttonUpFlag(btn uint8) uint32 {
+func buttonUpFlags(btn uint8) (uint32, uint32) {
 	switch btn {
 	case protocol.ButtonRight:
-		return mouseEventfRightUp
+		return mouseEventfRightUp, 0
 	case protocol.ButtonMiddle:
-		return mouseEventfMiddleUp
+		return mouseEventfMiddleUp, 0
+	case protocol.ButtonX1:
+		return mouseEventfXUp, xButton1
+	case protocol.ButtonX2:
+		return mouseEventfXUp, xButton2
 	default:
-		return mouseEventfLeftUp
+		return mouseEventfLeftUp, 0
 	}
 }
