@@ -4,21 +4,21 @@ $env:GOOS = "windows"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
 
-New-Item -ItemType Directory -Force -Path "cmd\admin\assets" | Out-Null
-New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+function Show-Bar([int]$Pct, [string]$Msg) {
+    $fill = [int]($Pct / 5)
+    $bar = ("#" * $fill).PadRight(20, ".")
+    Write-Host ("`r[{0}] {1,3}%  {2,-30}" -f $bar, $Pct, $Msg) -NoNewline
+}
 
-Write-Host "[1/2] Compilando plantilla del cliente (GUI nativa Windows)..."
+New-Item -ItemType Directory -Force -Path "cmd\admin\assets", "dist" | Out-Null
+
+Show-Bar 10 "Cliente..."
 go build -trimpath -ldflags="-H=windowsgui -s -w" -o "cmd\admin\assets\client_template.exe" ./cmd/client
+if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
 
-Write-Host "[2/2] Compilando aplicación de administración (GUI nativa Windows)..."
+Show-Bar 55 "Admin..."
 go build -trimpath -ldflags="-H=windowsgui -s -w" -o "dist\AdminRemoto.exe" ./cmd/admin
+if ($LASTEXITCODE -ne 0) { Write-Host ""; exit $LASTEXITCODE }
 
-$clientSize = [math]::Round((Get-Item "cmd\admin\assets\client_template.exe").Length / 1MB, 2)
-$adminSize  = [math]::Round((Get-Item "dist\AdminRemoto.exe").Length / 1MB, 2)
-
+Show-Bar 100 "Listo: dist\AdminRemoto.exe"
 Write-Host ""
-Write-Host "Compilación completada:"
-Write-Host "  - Plantilla cliente: cmd\admin\assets\client_template.exe ($clientSize MB)"
-Write-Host "  - Aplicación Admin:  dist\AdminRemoto.exe ($adminSize MB)"
-Write-Host ""
-Write-Host "Haz doble clic en .\dist\AdminRemoto.exe para abrir el panel."
