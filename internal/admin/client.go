@@ -63,10 +63,12 @@ func NewRelayClient(dataDir string) *RelayClient {
 		fileDoneCh:   make(map[string]chan protocol.FileDonePayload),
 	}
 	if data, err := os.ReadFile(rc.profilePath); err == nil {
-		var p security.RelayProfile
-		if json.Unmarshal(data, &p) == nil && p.Validate() == nil {
-			rc.profile = p
-			rc.hasProfile = true
+		if dec, err := security.UnprotectData(data); err == nil {
+			var p security.RelayProfile
+			if json.Unmarshal(dec, &p) == nil && p.Validate() == nil {
+				rc.profile = p
+				rc.hasProfile = true
+			}
 		}
 	}
 	return rc
