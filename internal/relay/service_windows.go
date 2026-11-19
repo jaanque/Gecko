@@ -3,7 +3,6 @@
 package relay
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"syscall"

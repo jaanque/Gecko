@@ -161,6 +161,26 @@ func main() {
 	}
 
 	srv := relay.NewServer(identity)
+
+	if *serviceMode {
+		log.Println("Iniciando RelayServidor bajo el Service Control Manager de Windows...")
+		err := relay.RunAsService("GeckoRelay", func(stopCh <-chan struct{}) {
+			go func() {
+				if err := srv.Serve(ln); err != nil {
+					log.Printf("Relay finalizado: %v", err)
+				}
+			}()
+			<-stopCh
+			log.Println("Servicio recibiendo señal de parada...")
+			_ = ln.Close()
+			srv.Close()
+		})
+		if err != nil {
+			log.Fatalf("Error en despachador de servicios: %v", err)
+		}
+		return
+	}
+
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
