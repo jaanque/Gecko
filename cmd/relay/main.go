@@ -34,6 +34,9 @@ func main() {
 	listClients := flag.Bool("list-clients", false, "Listar las credenciales de cliente emitidas y salir")
 	revokeID := flag.String("revoke", "", "Revocar una credencial de cliente por ID (o 'default') y salir")
 	healthcheck := flag.Bool("healthcheck", false, "Comprobar si el puerto del Relay responde localmente y salir")
+	installService := flag.Bool("install-service", false, "Instalar RelayServidor como servicio de Windows")
+	uninstallService := flag.Bool("uninstall-service", false, "Desinstalar el servicio de Windows de RelayServidor")
+	serviceMode := flag.Bool("service", false, "Ejecutar como servicio de Windows (invocado por el sistema)")
 	flag.Parse()
 
 	if *showVersion {
