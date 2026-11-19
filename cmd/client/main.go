@@ -325,8 +325,11 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		case protocol.MsgStreamConfig:
 			var sc protocol.StreamConfigPayload
 			if err := json.Unmarshal(data, &sc); err == nil {
-				if sc.Quality >= 30 && sc.Quality <= 95 {
+				if sc.Auto {
+					a.adaptive.SetAuto(true)
+				} else if sc.Quality >= 30 && sc.Quality <= 95 {
 					a.quality.Store(int32(sc.Quality))
+					a.adaptive.SetQuality(sc.Quality)
 				}
 				if sc.Monitor != nil {
 					a.monitorIdx.Store(int32(*sc.Monitor))
@@ -340,10 +343,17 @@ func (a *clientAgent) connectAndServe(ctx context.Context) error {
 		case protocol.MsgFrameAck:
 			if frameID, err := protocol.DecodeFrameAck(data); err == nil {
 				a.lastAckedFrameID.Store(frameID)
+				inFlight := int32(a.lastSentFrameID.Load() - frameID)
+				a.adaptive.RecordAck(frameID, inFlight)
 				select {
 				case a.ackWakeCh <- struct{}{}:
 				default:
 				}
+			}
+
+		case protocol.MsgElevateReq:
+			if a.isSessionActive() {
+				go func() { _ = win.RequestUACElevation() }()
 			}
 
 		case protocol.MsgMouse:

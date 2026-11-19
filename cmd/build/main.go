@@ -21,13 +21,13 @@ type buildTarget struct {
 }
 
 func main() {
-	arch := flag.String("arch", "amd64", "Arquitectura destino de Windows (amd64 o arm64)")
+	arch := flag.String("arch", "amd64", "Arquitectura destino de Windows (amd64, arm64 o 386)")
 	ver := flag.String("version", "", "Versión a incrustar en los binarios (ej. 1.0.0)")
 	flag.Parse()
 
 	goarch := strings.TrimSpace(*arch)
-	if goarch != "amd64" && goarch != "arm64" {
-		fmt.Fprintf(os.Stderr, "Arquitectura no soportada: %q (usa amd64 o arm64)\n", goarch)
+	if goarch != "amd64" && goarch != "arm64" && goarch != "386" {
+		fmt.Fprintf(os.Stderr, "Arquitectura no soportada: %q (usa amd64, arm64 o 386)\n", goarch)
 		os.Exit(1)
 	}
 

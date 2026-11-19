@@ -25,15 +25,14 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 	capturer := win.NewScreenCapturer()
 	defer capturer.Close()
 
+	cursorTracker := win.NewCursorTracker()
+
 	a.lastSentFrameID.Store(0)
 	a.lastAckedFrameID.Store(0)
 
-	const (
-		frameInterval = 16 * time.Millisecond
-		maxInFlight   = 2
-	)
+	const maxInFlight = 2
 
-	timer := time.NewTimer(frameInterval)
+	timer := time.NewTimer(a.adaptive.Interval())
 	defer timer.Stop()
 
 	sleep := func(d time.Duration) bool {
@@ -49,6 +48,17 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 	var frameSeq uint32
 
 	for ctx.Err() == nil {
+		activeConn := a.getActiveConn(conn)
+
+		// 1. Decoupled mouse cursor tracking & dispatch (RustDesk architecture)
+		monIdx := int(a.monitorIdx.Load())
+		if curPkt, ok := cursorTracker.Poll(monIdx); ok && curPkt != nil {
+			if raw, err := protocol.EncodeCursor(*curPkt); err == nil {
+				_ = a.writeMessage(activeConn, protocol.MsgCursor, raw)
+			}
+		}
+
+		// 2. Flow control / backpressure check
 		if int32(a.lastSentFrameID.Load()-a.lastAckedFrameID.Load()) >= maxInFlight {
 			resetTimer(timer, 300*time.Millisecond)
 			select {
@@ -61,8 +71,7 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 		}
 
 		start := time.Now()
-		q := int(a.quality.Load())
-		monIdx := int(a.monitorIdx.Load())
+		q := a.adaptive.Quality()
 		force := a.forceKeyframe.Swap(false)
 
 		nextID := frameSeq + 1
@@ -77,13 +86,15 @@ func (a *clientAgent) streamScreen(ctx context.Context, conn net.Conn, sid strin
 		if len(frame) > 0 {
 			frameSeq = nextID
 			a.lastSentFrameID.Store(frameSeq)
-			if err := a.writeMessage(conn, protocol.MsgFrame, frame); err != nil {
+			a.adaptive.RecordSent(frameSeq)
+			if err := a.writeMessage(activeConn, protocol.MsgFrame, frame); err != nil {
 				a.handleRemoteSessionStop(sid)
 				return
 			}
 		}
 
-		wait := max(frameInterval-time.Since(start), 2*time.Millisecond)
+		interval := a.adaptive.Interval()
+		wait := max(interval-time.Since(start), 2*time.Millisecond)
 		if !sleep(wait) {
 			return
 		}

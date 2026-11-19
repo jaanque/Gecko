@@ -18,19 +18,11 @@ var (
 	procGetWindowPlacement = user32GUI.NewProc("GetWindowPlacement")
 	procSetWindowPlacement = user32GUI.NewProc("SetWindowPlacement")
 	procMonitorFromWindow  = user32GUI.NewProc("MonitorFromWindow")
-	procCreateIconIndirect = user32GUI.NewProc("CreateIconIndirect")
-	procDestroyIcon        = user32GUI.NewProc("DestroyIcon")
-	procCreateDIBSection   = gdi32GUI.NewProc("CreateDIBSection")
-	procCreateBitmap       = gdi32GUI.NewProc("CreateBitmap")
-	procDrawIconEx         = user32GUI.NewProc("DrawIconEx")
-	procLoadCursorW        = user32GUI.NewProc("LoadCursorW")
 )
 
 const (
 	wsOverlappedWindow = 0x00CF0000
 	wmDropFiles        = 0x0233
-	diNormal           = 0x0003
-	idcArrow           = 32512
 
 	wmSize         = 0x0005
 	wmKillFocus    = 0x0008

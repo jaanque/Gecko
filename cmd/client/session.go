@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"net"
 	"time"
 
+	"remote-control/internal/p2p"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
 	"remote-control/internal/win"
@@ -101,6 +103,19 @@ func (a *clientAgent) onUserAllow() {
 	a.window.SetState(win.UIStateActive, "")
 	a.monitorIdx.Store(0)
 	a.forceKeyframe.Store(true)
+
+	if p2pLn, err := p2p.StartP2PListener(); err == nil {
+		a.mu.Lock()
+		a.p2pLn = p2pLn
+		a.mu.Unlock()
+		_ = a.writeJSON(conn, protocol.MsgP2POffer, protocol.P2POfferPayload{
+			SessionID: sid,
+			Endpoints: p2pLn.Endpoints(),
+			Token:     p2pLn.Token(),
+		})
+		go a.watchP2PAccept(streamCtx, p2pLn, sid)
+	}
+
 	go a.streamScreen(streamCtx, conn, sid)
 }
 
@@ -174,6 +189,14 @@ func (a *clientAgent) clearSessionLocked() {
 		a.streamCancel()
 		a.streamCancel = nil
 	}
+	if a.p2pLn != nil {
+		a.p2pLn.Close()
+		a.p2pLn = nil
+	}
+	if a.p2pConn != nil {
+		_ = a.p2pConn.Close()
+		a.p2pConn = nil
+	}
 	a.pendingID = ""
 	a.activeID = ""
 }
@@ -236,5 +259,29 @@ func (a *clientAgent) onLocalClipboard(text string) {
 
 	if changed {
 		_ = a.writeJSON(conn, protocol.MsgClipboard, protocol.ClipboardPayload{Text: text})
+	}
+}
+
+func (a *clientAgent) getActiveConn(fallback net.Conn) net.Conn {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.p2pConn != nil {
+		return a.p2pConn
+	}
+	return fallback
+}
+
+func (a *clientAgent) watchP2PAccept(ctx context.Context, ln *p2p.P2PListener, sid string) {
+	select {
+	case <-ctx.Done():
+		return
+	case directConn := <-ln.Conn():
+		a.mu.Lock()
+		if a.activeID == sid {
+			a.p2pConn = directConn
+		} else {
+			_ = directConn.Close()
+		}
+		a.mu.Unlock()
 	}
 }
