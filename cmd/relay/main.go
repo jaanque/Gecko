@@ -52,6 +52,32 @@ func main() {
 		os.Exit(0)
 	}
 
+	if *installService {
+		var extraArgs []string
+		if *listenAddr != defaultListen {
+			extraArgs = append(extraArgs, fmt.Sprintf("-listen %s", *listenAddr))
+		}
+		if *dataDir != "" {
+			extraArgs = append(extraArgs, fmt.Sprintf("-data-dir \"%s\"", *dataDir))
+		}
+		if *publicAddr != "" {
+			extraArgs = append(extraArgs, fmt.Sprintf("-public-addr %s", *publicAddr))
+		}
+		if err := relay.InstallService("GeckoRelay", "Gecko Relay Server", extraArgs); err != nil {
+			log.Fatalf("Error instalando servicio: %v", err)
+		}
+		fmt.Println("Servicio de Windows 'GeckoRelay' instalado con inicio automático correctamente.")
+		return
+	}
+
+	if *uninstallService {
+		if err := relay.UninstallService("GeckoRelay"); err != nil {
+			log.Fatalf("Error desinstalando servicio: %v", err)
+		}
+		fmt.Println("Servicio de Windows 'GeckoRelay' desinstalado correctamente.")
+		return
+	}
+
 	resolvedData := *dataDir
 	if resolvedData == "" {
 		if exe, err := os.Executable(); err == nil {
