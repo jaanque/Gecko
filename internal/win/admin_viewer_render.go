@@ -3,7 +3,6 @@
 package win
 
 import (
-	"fmt"
 	"time"
 	"unsafe"
 )
@@ -115,10 +114,7 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 
 	v.mu.Lock()
 	hostname := v.hostname
-	rw, rh := v.remoteW, v.remoteH
-	fps := v.fps
 	rtt := v.rttMs
-	qual := v.quality
 	activeMon := v.activeMonitor
 	statusMsg := ""
 	if v.statusMsg != "" && time.Now().Before(v.statusUntil) {

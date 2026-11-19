@@ -3,7 +3,6 @@
 package win
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"unsafe"

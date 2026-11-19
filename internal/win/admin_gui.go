@@ -5,14 +5,12 @@ package win
 import (
 	"fmt"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
 
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
-	"remote-control/internal/version"
 )
 
 var (
