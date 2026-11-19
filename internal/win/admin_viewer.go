@@ -736,6 +736,17 @@ func viewerWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		go v.onLocalClipboardChanged()
 		return 0
 
+	case wmDropFiles:
+		hDrop := wParam
+		var buf [260]uint16
+		r, _, _ := procDragQueryFileW.Call(hDrop, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		procDragFinish.Call(hDrop)
+		if r > 0 && v.cb.OnSendFile != nil {
+			path := syscall.UTF16ToString(buf[:r])
+			go v.cb.OnSendFile(path)
+		}
+		return 0
+
 	case wmKeyDown, wmSysKeyDown:
 		// Fallback when low-level keyboard hook is not active.
 		if v.kbHook == 0 {
