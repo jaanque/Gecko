@@ -162,6 +162,18 @@ func (s *Server) serveAdmin(rawConn net.Conn, payload []byte) {
 			if json.Unmarshal(data, &fd) == nil && fd.TransferID != "" {
 				s.forwardToClient(ap, mType, data)
 			}
+
+		case protocol.MsgElevateReq:
+			var el protocol.ElevateReqPayload
+			if json.Unmarshal(data, &el) == nil {
+				s.forwardToClient(ap, mType, data)
+			}
+
+		case protocol.MsgP2PAnswer:
+			var ans protocol.P2PAnswerPayload
+			if json.Unmarshal(data, &ans) == nil {
+				s.forwardToClient(ap, mType, data)
+			}
 		}
 	}
 }

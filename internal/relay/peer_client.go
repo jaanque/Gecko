@@ -132,10 +132,19 @@ func (s *Server) serveClient(rawConn net.Conn, leafCert *x509.Certificate, paylo
 		case protocol.MsgFrame:
 			s.forwardToAdmin(cp, protocol.MsgFrame, data)
 
+		case protocol.MsgCursor:
+			s.forwardToAdmin(cp, protocol.MsgCursor, data)
+
 		case protocol.MsgClipboard:
 			var clip protocol.ClipboardPayload
 			if json.Unmarshal(data, &clip) == nil {
 				s.forwardToAdmin(cp, protocol.MsgClipboard, data)
+			}
+
+		case protocol.MsgP2POffer:
+			var offer protocol.P2POfferPayload
+			if json.Unmarshal(data, &offer) == nil {
+				s.forwardToAdmin(cp, protocol.MsgP2POffer, data)
 			}
 
 		case protocol.MsgFileAccept:
