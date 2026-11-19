@@ -466,6 +466,12 @@ func (v *remoteViewer) CloseUI() {
 		removeClipboardListener(hwnd)
 		procDestroyWindow.Call(hwnd)
 	}
+	v.cursorMu.Lock()
+	if v.cursorHIcon != 0 {
+		procDestroyIcon.Call(v.cursorHIcon)
+		v.cursorHIcon = 0
+	}
+	v.cursorMu.Unlock()
 	v.releaseBackbuffer()
 	v.destroyFonts()
 }
