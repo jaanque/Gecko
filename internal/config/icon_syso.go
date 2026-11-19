@@ -19,7 +19,7 @@ const (
 	imageScnMemRead            = 0x40000000
 
 	imageRelAMD64Addr32NB = 3
-	imageRelARM64Addr32NB = 3
+	imageRelARM64Addr32NB = 2
 
 	rtIcon      = 3
 	rtGroupIcon = 14

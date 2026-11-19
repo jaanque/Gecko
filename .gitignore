@@ -8,5 +8,3 @@ data/
 
 # Archivos del sistema
 .DS_Store
-
-*.syso
