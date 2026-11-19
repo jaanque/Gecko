@@ -132,17 +132,17 @@ func GenerateResourceSyso(pngBytes []byte, arch string) ([]byte, error) {
 
 	// GRPICONDIR + GRPICONDIRENTRY
 	var grpIcon bytes.Buffer
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(0))           // idReserved
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))           // idType (1 = icon)
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))           // idCount
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(w))            // bWidth
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(h))            // bHeight
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(0))            // bColorCount
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(0))            // bReserved
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))           // wPlanes
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(32))          // wBitCount
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(0))             // idReserved
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))             // idType (1 = icon)
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))             // idCount
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(w))              // bWidth
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(h))              // bHeight
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(0))              // bColorCount
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint8(0))              // bReserved
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))             // wPlanes
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(32))            // wBitCount
 	_ = binary.Write(&grpIcon, binary.LittleEndian, uint32(len(pngBytes))) // dwBytesInRes
-	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))           // nID
+	_ = binary.Write(&grpIcon, binary.LittleEndian, uint16(1))             // nID
 	grpBytes := grpIcon.Bytes()
 
 	offsetRoot := 0
@@ -228,14 +228,14 @@ func GenerateResourceSyso(pngBytes []byte, arch string) ([]byte, error) {
 	var secName [8]byte
 	copy(secName[:], ".rsrc")
 	_ = binary.Write(&out, binary.LittleEndian, secName)
-	_ = binary.Write(&out, binary.LittleEndian, uint32(0))                 // VirtualSize
-	_ = binary.Write(&out, binary.LittleEndian, uint32(0))                 // VirtualAddress
-	_ = binary.Write(&out, binary.LittleEndian, uint32(len(rsrc)))         // SizeOfRawData
-	_ = binary.Write(&out, binary.LittleEndian, uint32(offsetRawData))     // PointerToRawData
-	_ = binary.Write(&out, binary.LittleEndian, uint32(offsetRelocs))      // PointerToRelocations
-	_ = binary.Write(&out, binary.LittleEndian, uint32(0))                 // PointerToLinenumbers
-	_ = binary.Write(&out, binary.LittleEndian, uint16(2))                 // NumberOfRelocations
-	_ = binary.Write(&out, binary.LittleEndian, uint16(0))                 // NumberOfLinenumbers
+	_ = binary.Write(&out, binary.LittleEndian, uint32(0))             // VirtualSize
+	_ = binary.Write(&out, binary.LittleEndian, uint32(0))             // VirtualAddress
+	_ = binary.Write(&out, binary.LittleEndian, uint32(len(rsrc)))     // SizeOfRawData
+	_ = binary.Write(&out, binary.LittleEndian, uint32(offsetRawData)) // PointerToRawData
+	_ = binary.Write(&out, binary.LittleEndian, uint32(offsetRelocs))  // PointerToRelocations
+	_ = binary.Write(&out, binary.LittleEndian, uint32(0))             // PointerToLinenumbers
+	_ = binary.Write(&out, binary.LittleEndian, uint16(2))             // NumberOfRelocations
+	_ = binary.Write(&out, binary.LittleEndian, uint16(0))             // NumberOfLinenumbers
 	_ = binary.Write(&out, binary.LittleEndian, uint32(imageScnCntInitializedData|imageScnMemRead))
 
 	// Section Raw Data

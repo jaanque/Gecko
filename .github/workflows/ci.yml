@@ -3,12 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -16,7 +17,7 @@ concurrency:
 
 jobs:
   comprobar:
-    name: Comprobar sistema
+    name: Comprobar y compilar
     runs-on: ubuntu-latest
     steps:
       - name: Descargar repositorio
@@ -50,8 +51,34 @@ jobs:
           CGO_ENABLED: "0"
         run: go test -v ./...
 
-      - name: Compilar binarios de Windows (amd64 y arm64)
+      - name: Compilar y empaquetar Windows amd64
         run: |
           go run ./cmd/build -arch amd64
+          mkdir -p dist-amd64
+          cp dist/AdminRemoto.exe dist/RelayServidor.exe README.md LICENSE dist-amd64/
+          cd dist-amd64 && zip -r ../Gecko-Windows-amd64.zip * && cd ..
+
+      - name: Compilar y empaquetar Windows arm64
+        run: |
           go run ./cmd/build -arch arm64
-          ls -lh dist/
+          mkdir -p dist-arm64
+          cp dist/AdminRemoto.exe dist/RelayServidor.exe README.md LICENSE dist-arm64/
+          cd dist-arm64 && zip -r ../Gecko-Windows-arm64.zip * && cd ..
+
+      - name: Subir artefactos de compilación
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gecko-Windows-Binaries
+          path: |
+            Gecko-Windows-amd64.zip
+            Gecko-Windows-arm64.zip
+          retention-days: 14
+
+      - name: Publicar Release en GitHub (solo en tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Gecko-Windows-amd64.zip
+            Gecko-Windows-arm64.zip
+          generate_release_notes: true
