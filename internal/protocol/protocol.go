@@ -42,8 +42,10 @@ const (
 	MsgStreamConfig         uint8 = 0x13
 	MsgAdminConnect         uint8 = 0x14
 	MsgSessionEvent         uint8 = 0x15
+	MsgElevateReq           uint8 = 0x16
 	MsgFrame                uint8 = 0x20
 	MsgFrameAck             uint8 = 0x21
+	MsgCursor               uint8 = 0x22
 	MsgMouse                uint8 = 0x30
 	MsgKey                  uint8 = 0x31
 	MsgClipboard            uint8 = 0x32
@@ -52,6 +54,8 @@ const (
 	MsgFileAccept           uint8 = 0x41
 	MsgFileChunk            uint8 = 0x42
 	MsgFileDone             uint8 = 0x43
+	MsgP2POffer             uint8 = 0x50
+	MsgP2PAnswer            uint8 = 0x51
 )
 
 // System actions.
@@ -197,6 +201,7 @@ type StreamConfigPayload struct {
 	Quality  int  `json:"quality,omitempty"` // 35..95
 	Monitor  *int `json:"monitor,omitempty"` // 0..N-1 for specific monitor, -1 for all
 	Keyframe bool `json:"keyframe,omitempty"`
+	Auto     bool `json:"auto,omitempty"`     // true to let dynamic adaptive controller adjust quality & FPS
 }
 
 // ClipboardPayload synchronizes UTF-8 clipboard text during an active session.
@@ -230,6 +235,112 @@ type FileDonePayload struct {
 	OK         bool   `json:"ok"`
 	SavedPath  string `json:"saved_path,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// ElevateReqPayload requests the client to elevate via UAC or restart as an elevated service agent.
+type ElevateReqPayload struct {
+	SessionID string `json:"session_id"`
+}
+
+// P2POfferPayload advertises direct LAN / public listener endpoints for peer-to-peer connection.
+type P2POfferPayload struct {
+	SessionID string   `json:"session_id"`
+	Endpoints []string `json:"endpoints"`
+	Token     string   `json:"token"`
+}
+
+// P2PAnswerPayload responds to a P2POfferPayload indicating direct connection outcome.
+type P2PAnswerPayload struct {
+	SessionID string `json:"session_id"`
+	OK        bool   `json:"ok"`
+	Endpoint  string `json:"endpoint,omitempty"`
+}
+
+const (
+	MaxCursorPayloadSize = 64 * 1024
+	CursorHeaderSize     = 18
+
+	CursorFlagVisible  uint8 = 1 << 0
+	CursorFlagHasShape uint8 = 1 << 1
+)
+
+// CursorPacket carries decoupled mouse cursor position and shape information.
+type CursorPacket struct {
+	X         uint16
+	Y         uint16
+	HotspotX  uint16
+	HotspotY  uint16
+	Width     uint16
+	Height    uint16
+	Visible   bool
+	ShapeHash uint32
+	ShapeBGRA []byte
+}
+
+// EncodeCursor encodes a CursorPacket into a compact binary representation.
+func EncodeCursor(p CursorPacket) ([]byte, error) {
+	flags := uint8(0)
+	if p.Visible {
+		flags |= CursorFlagVisible
+	}
+	hasShape := len(p.ShapeBGRA) > 0
+	if hasShape {
+		flags |= CursorFlagHasShape
+	}
+
+	total := CursorHeaderSize
+	if hasShape {
+		total += 4 + len(p.ShapeBGRA)
+	}
+	if total > MaxCursorPayloadSize {
+		return nil, errors.New("cursor packet exceeds max payload size")
+	}
+
+	buf := make([]byte, total)
+	binary.BigEndian.PutUint16(buf[0:2], p.X)
+	binary.BigEndian.PutUint16(buf[2:4], p.Y)
+	binary.BigEndian.PutUint16(buf[4:6], p.HotspotX)
+	binary.BigEndian.PutUint16(buf[6:8], p.HotspotY)
+	binary.BigEndian.PutUint16(buf[8:10], p.Width)
+	binary.BigEndian.PutUint16(buf[10:12], p.Height)
+	buf[12] = flags
+	buf[13] = 0 // reserved
+	binary.BigEndian.PutUint32(buf[14:18], p.ShapeHash)
+
+	if hasShape {
+		binary.BigEndian.PutUint32(buf[18:22], uint32(len(p.ShapeBGRA)))
+		copy(buf[22:], p.ShapeBGRA)
+	}
+	return buf, nil
+}
+
+// DecodeCursor decodes a CursorPacket from raw bytes.
+func DecodeCursor(b []byte) (CursorPacket, error) {
+	if len(b) < CursorHeaderSize {
+		return CursorPacket{}, errors.New("cursor payload too short")
+	}
+	p := CursorPacket{
+		X:         binary.BigEndian.Uint16(b[0:2]),
+		Y:         binary.BigEndian.Uint16(b[2:4]),
+		HotspotX:  binary.BigEndian.Uint16(b[4:6]),
+		HotspotY:  binary.BigEndian.Uint16(b[6:8]),
+		Width:     binary.BigEndian.Uint16(b[8:10]),
+		Height:    binary.BigEndian.Uint16(b[10:12]),
+		Visible:   (b[12] & CursorFlagVisible) != 0,
+		ShapeHash: binary.BigEndian.Uint32(b[14:18]),
+	}
+	hasShape := (b[12] & CursorFlagHasShape) != 0
+	if hasShape {
+		if len(b) < CursorHeaderSize+4 {
+			return CursorPacket{}, errors.New("cursor payload truncated shape length")
+		}
+		dataLen := int(binary.BigEndian.Uint32(b[18:22]))
+		if dataLen > MaxCursorPayloadSize || CursorHeaderSize+4+dataLen > len(b) {
+			return CursorPacket{}, errors.New("cursor payload truncated shape data")
+		}
+		p.ShapeBGRA = b[22 : 22+dataLen]
+	}
+	return p, nil
 }
 
 // FileChunk carries one binary chunk of a file transfer.
@@ -402,7 +513,8 @@ func MaxPayloadForType(msgType uint8) (uint32, bool) {
 		MsgAdminProvisionClient, MsgAdminProvisionResp, MsgAdminRevokeClient,
 		MsgConsentReq, MsgConsentResp, MsgSessionStop,
 		MsgStreamConfig, MsgSessionEvent, MsgSystemAction,
-		MsgFileOffer, MsgFileAccept, MsgFileDone:
+		MsgFileOffer, MsgFileAccept, MsgFileDone,
+		MsgElevateReq, MsgP2POffer, MsgP2PAnswer:
 		return MaxControlPayloadSize, true
 	case MsgClientList:
 		return MaxListPayloadSize, true
@@ -410,6 +522,8 @@ func MaxPayloadForType(msgType uint8) (uint32, bool) {
 		return MaxPingPayloadSize, true
 	case MsgClipboard:
 		return MaxClipboardPayloadSize, true
+	case MsgCursor:
+		return MaxCursorPayloadSize, true
 	case MsgFileChunk:
 		return MaxFileChunkPayloadSize, true
 	case MsgFrame:
