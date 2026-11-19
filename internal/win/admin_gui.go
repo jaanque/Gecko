@@ -300,6 +300,16 @@ func (a *AdminWindow) PushFrame(sessionID string, frame []byte) {
 	}
 }
 
+// PushCursor forwards an incoming MsgCursor packet to the active viewer window.
+func (a *AdminWindow) PushCursor(pkt protocol.CursorPacket) {
+	a.mu.Lock()
+	v := a.viewer
+	a.mu.Unlock()
+	if v != nil {
+		v.ApplyRemoteCursor(pkt)
+	}
+}
+
 // SetLatency updates the measured round-trip latency (ms) in the viewer toolbar.
 func (a *AdminWindow) SetLatency(rttMs int) {
 	a.mu.Lock()

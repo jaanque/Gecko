@@ -260,6 +260,31 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 		)
 	})
 
+	// 2.5 Draw decoupled mouse cursor overlay smoothly on top of remote desktop image.
+	v.cursorMu.Lock()
+	curVis := v.cursorVisible
+	curX := v.cursorX
+	curY := v.cursorY
+	curHotX := v.cursorHotX
+	curHotY := v.cursorHotY
+	hCurIcon := v.cursorHIcon
+	v.cursorMu.Unlock()
+
+	if curVis && v.imgRect.Right > v.imgRect.Left {
+		imgW := v.imgRect.Right - v.imgRect.Left
+		imgH := v.imgRect.Bottom - v.imgRect.Top
+		cx := v.imgRect.Left + int32(int64(curX)*int64(imgW)/65535) - int32(curHotX)
+		cy := v.imgRect.Top + int32(int64(curY)*int64(imgH)/65535) - int32(curHotY)
+		if hCurIcon != 0 {
+			procDrawIconEx.Call(memDC, uintptr(cx), uintptr(cy), hCurIcon, 0, 0, 0, 0, diNormal)
+		} else {
+			hArrow, _, _ := procLoadCursorW.Call(0, idcArrow)
+			if hArrow != 0 {
+				procDrawIconEx.Call(memDC, uintptr(cx), uintptr(cy), hArrow, 0, 0, 0, 0, diNormal)
+			}
+		}
+	}
+
 	// 3. When toolbar is hidden, draw the compact top-center floating control capsule on top of the viewport.
 	if v.toolbarHidden && v.pillBox.Right > v.pillBox.Left {
 		// Slightly raise top edge so only the bottom corners are rounded like a crisp pull-tab.

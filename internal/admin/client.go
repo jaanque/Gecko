@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"remote-control/internal/p2p"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
 )
@@ -28,6 +29,7 @@ type RelayEvents struct {
 	OnSessionEnded   func(sessionID, hostname, reason string)
 	OnSessionError   func(reason string)
 	OnFrame          func(sessionID string, frameData []byte)
+	OnCursor         func(pkt protocol.CursorPacket)
 	OnLatency        func(rttMs int)
 	OnClipboard      func(text string)
 	OnFileStatus     func(name string, ok bool, detail string)
