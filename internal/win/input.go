@@ -80,6 +80,7 @@ func (inj *InputInjector) HandleMouse(ev protocol.MouseEvent, monitorIndex int) 
 	if !inj.enabled.Load() {
 		return
 	}
+	SwitchThreadToInputDesktop()
 	if ev.Action > protocol.MouseHWheel || ev.Button > protocol.ButtonX2 {
 		return
 	}
@@ -147,6 +148,7 @@ func (inj *InputInjector) HandleKey(ev protocol.KeyEvent) {
 	if !inj.enabled.Load() {
 		return
 	}
+	SwitchThreadToInputDesktop()
 	if ev.Action > protocol.KeyUp || ev.VK == 0 || ev.VK > 0xFE || (ev.Flags&^protocol.KeyFlagExtended) != 0 {
 		return
 	}

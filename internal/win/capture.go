@@ -203,6 +203,8 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int
 		sc.dxgi.Close()
 	}
 
+	SwitchThreadToInputDesktop()
+
 	hdcScreen, _, _ := procGetDC.Call(0)
 	if hdcScreen == 0 {
 		return nil, w, h, errors.New("GetDC failed")
@@ -221,8 +223,6 @@ func (sc *ScreenCapturer) CaptureFrame(frameID uint32, monitorIndex, quality int
 	if r == 0 {
 		return nil, w, h, errors.New("BitBlt failed (desktop may be locked or UAC active)")
 	}
-
-	drawCursor(sc.hdcMem, vx, vy)
 
 	var bi bitmapInfo
 	bi.Header.Size = uint32(unsafe.Sizeof(bi.Header))

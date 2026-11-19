@@ -195,6 +195,9 @@ func main() {
 		OnFrame: func(sessionID string, frameData []byte) {
 			window.PushFrame(sessionID, frameData)
 		},
+		OnCursor: func(pkt protocol.CursorPacket) {
+			window.PushCursor(pkt)
+		},
 		OnLatency: func(rttMs int) {
 			window.SetLatency(rttMs)
 		},

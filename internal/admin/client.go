@@ -239,6 +239,19 @@ func (c *RelayClient) SendSystemAction(action string) {
 	}
 }
 
+// SendElevateReq requests the remote client to elevate via UAC or restart as an elevated service agent.
+func (c *RelayClient) SendElevateReq() {
+	c.mu.RLock()
+	sid := c.activeSession
+	c.mu.RUnlock()
+	if sid == "" {
+		return
+	}
+	if conn := c.currentConn(); conn != nil {
+		_ = c.writeJSON(conn, protocol.MsgElevateReq, protocol.ElevateReqPayload{SessionID: sid})
+	}
+}
+
 // SendStreamConfig updates quality on the active client through the Relay.
 func (c *RelayClient) SendStreamConfig(quality int, keyframe bool) {
 	if conn := c.currentConn(); conn != nil {
@@ -491,6 +504,40 @@ func (c *RelayClient) connectAndServe(ctx context.Context, gen uint64, prof secu
 				cb(sid, data)
 			}
 
+		case protocol.MsgCursor:
+			if pkt, err := protocol.DecodeCursor(data); err == nil {
+				c.mu.RLock()
+				sid := c.activeSession
+				cb := c.events.OnCursor
+				c.mu.RUnlock()
+				if sid != "" && cb != nil {
+					cb(pkt)
+				}
+			}
+
+		case protocol.MsgP2POffer:
+			var offer protocol.P2POfferPayload
+			if json.Unmarshal(data, &offer) == nil && offer.SessionID != "" {
+				go func(off protocol.P2POfferPayload) {
+					p2pCtx, p2pCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					defer p2pCancel()
+					if directConn, err := p2p.DialP2POffer(p2pCtx, off, 450*time.Millisecond); err == nil {
+						c.mu.RLock()
+						sid := c.activeSession
+						c.mu.RUnlock()
+						if sid == off.SessionID {
+							_ = c.writeJSON(c.currentConn(), protocol.MsgP2PAnswer, protocol.P2PAnswerPayload{
+								SessionID: sid,
+								OK:        true,
+							})
+							go c.readDirectP2PLoop(directConn, sid)
+						} else {
+							_ = directConn.Close()
+						}
+					}
+				}(offer)
+			}
+
 		case protocol.MsgClipboard:
 			var clip protocol.ClipboardPayload
 			if json.Unmarshal(data, &clip) == nil && clip.Text != "" {
@@ -596,6 +643,40 @@ func (c *RelayClient) writeJSON(conn net.Conn, msgType uint8, v any) error {
 	defer c.writeMu.Unlock()
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return protocol.WriteJSON(conn, msgType, v)
+}
+
+func (c *RelayClient) readDirectP2PLoop(conn net.Conn, sessionID string) {
+	defer conn.Close()
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		mType, data, err := protocol.ReadMessage(conn)
+		if err != nil {
+			return
+		}
+
+		c.mu.RLock()
+		sid := c.activeSession
+		onFrame := c.events.OnFrame
+		onCursor := c.events.OnCursor
+		c.mu.RUnlock()
+
+		if sid != sessionID {
+			return
+		}
+
+		switch mType {
+		case protocol.MsgFrame:
+			if onFrame != nil {
+				onFrame(sid, data)
+			}
+		case protocol.MsgCursor:
+			if pkt, err := protocol.DecodeCursor(data); err == nil && onCursor != nil {
+				onCursor(pkt)
+			}
+		case protocol.MsgPing:
+			_ = protocol.WriteMessage(conn, protocol.MsgPong, data)
+		}
+	}
 }
 
 func normalizeHostPort(addr, defaultPort string) string {

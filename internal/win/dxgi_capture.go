@@ -496,12 +496,7 @@ func (d *dxgiCapturer) AcquireFrame(targetX, targetY, targetW, targetH int, forc
 
 	comVtblCall(d.context, vtblID3D11DeviceContextUnmap, d.staging, 0)
 
-	cursorRects, _ := d.updateCursorOverlay()
-	if !needFullCopy && len(cursorRects) > 0 {
-		dirtyRects = append(dirtyRects, cursorRects...)
-	}
-
-	return d.frameBGRA, dirtyRects, true, nil
+	return d.cleanBGRA, dirtyRects, true, nil
 }
 
 func (d *dxgiCapturer) extractDirtyRects(metaBytes uint32) []image.Rectangle {
