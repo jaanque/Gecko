@@ -251,27 +251,12 @@ func (a *AdminWindow) paintDevicesTab(memDC uintptr, cw, ch, pad, topY int32, cl
 		nameRC := rect{textLeft, ry + a.scale(10), textRight, ry + a.scale(32)}
 		drawText(memDC, c.Hostname, &nameRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-		metaParts := make([]string, 0, 5)
 		if c.Username != "" {
-			metaParts = append(metaParts, c.Username)
+			procSelectObject.Call(memDC, a.fontBody)
+			procSetTextColor.Call(memDC, rgb(113, 113, 122))
+			userRC := rect{textLeft, ry + a.scale(33), textRight, ry + a.scale(52)}
+			drawText(memDC, c.Username, &userRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 		}
-		if c.IP != "" {
-			metaParts = append(metaParts, c.IP)
-		}
-		if c.Width > 0 && c.Height > 0 {
-			metaParts = append(metaParts, fmt.Sprintf("%d×%d", c.Width, c.Height))
-		}
-		if c.MonitorCount > 1 {
-			metaParts = append(metaParts, fmt.Sprintf("%d monitores", c.MonitorCount))
-		}
-		if c.Version != "" {
-			metaParts = append(metaParts, "v"+strings.TrimPrefix(c.Version, "v"))
-		}
-		meta := strings.Join(metaParts, " · ")
-		procSelectObject.Call(memDC, a.fontMono)
-		procSetTextColor.Call(memDC, rgb(113, 113, 122))
-		metaRC := rect{textLeft, ry + a.scale(33), textRight, ry + a.scale(52)}
-		drawText(memDC, meta, &metaRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
 		procSelectObject.Call(memDC, a.fontBody)
 		procSetTextColor.Call(memDC, rgb(82, 82, 91))
@@ -440,7 +425,7 @@ func (a *AdminWindow) paintBuilderTab(memDC uintptr, cw, ch, pad, topY int32, ha
 		winBg = rgb(39, 39, 42)
 	}
 	procSelectObject.Call(memDC, a.fontBtn)
-	drawFlatButton(memDC, saveWinRC, a.scale(6), winBg, winBg, rgb(255, 255, 255), "Guardar ClientRemot.exe")
+	drawFlatButton(memDC, saveWinRC, a.scale(6), winBg, winBg, rgb(255, 255, 255), "Guardar cliente")
 }
 
 func (a *AdminWindow) paintServerTab(memDC uintptr, cw, ch int32, hasProfile, relayOK bool, relayDetail string, profile security.RelayProfile) {
@@ -451,10 +436,10 @@ func (a *AdminWindow) paintServerTab(memDC uintptr, cw, ch int32, hasProfile, re
 	procSelectObject.Call(memDC, a.fontBtn)
 	procSetTextColor.Call(memDC, rgb(24, 24, 27))
 	l1 := rect{innerL, addrY, rightEdge, addrY + a.scale(20)}
-	drawText(memDC, "Dirección (host:puerto)", &l1, dtLeft|dtSingleLn|dtVCenter)
+	drawText(memDC, "Dirección", &l1, dtLeft|dtSingleLn|dtVCenter)
 
 	l2 := rect{innerL, keyY, rightEdge, keyY + a.scale(20)}
-	drawText(memDC, "Clave (RMT2:...)", &l2, dtLeft|dtSingleLn|dtVCenter)
+	drawText(memDC, "Clave", &l2, dtLeft|dtSingleLn|dtVCenter)
 
 	pasteW := a.scale(78)
 	pasteH := a.scale(28)
@@ -477,7 +462,7 @@ func (a *AdminWindow) paintServerTab(memDC uintptr, cw, ch int32, hasProfile, re
 	if hasProfile {
 		if relayOK {
 			dotCol = rgb(22, 163, 74)
-			stLine = "Conectado · " + profile.ServerAddr
+			stLine = "Conectado"
 		} else {
 			dotCol = rgb(217, 119, 6)
 			stLine = relayDetail

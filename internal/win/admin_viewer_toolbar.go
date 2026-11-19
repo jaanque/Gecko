@@ -92,11 +92,8 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	hideW := v.scale(30)
 	discW := v.scale(94)
 	fullW := v.scale(116)
-	cadW := v.scale(52)
+	cadW := v.scale(92)
 	fileW := v.scale(64)
-	qHiW := v.scale(44)
-	qMedW := v.scale(66)
-	qLowW := v.scale(44)
 
 	x := width - pad
 
@@ -117,16 +114,7 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	x = rcCAD.Left - smallGap
 
 	rcFile := rect{x - fileW, btnY, x, btnY + btnH}
-	x = rcFile.Left - v.scale(8)
-	v.toolbarDividers = append(v.toolbarDividers, x)
-	x -= v.scale(8)
-
-	rcHi := rect{x - qHiW, btnY, x, btnY + btnH}
-	x = rcHi.Left - smallGap
-	rcMed := rect{x - qMedW, btnY, x, btnY + btnH}
-	x = rcMed.Left - smallGap
-	rcLow := rect{x - qLowW, btnY, x, btnY + btnH}
-	x = rcLow.Left
+	x = rcFile.Left - gap
 
 	btns := make([]viewerToolbarBtn, 0, 16)
 
@@ -163,11 +151,8 @@ func (v *remoteViewer) layoutToolbar(width int32) int32 {
 	}
 
 	btns = append(btns,
-		viewerToolbarBtn{id: vbtnQualLow, label: "Baja", rc: rcLow},
-		viewerToolbarBtn{id: vbtnQualMed, label: "Estándar", rc: rcMed},
-		viewerToolbarBtn{id: vbtnQualHi, label: "Alta", rc: rcHi},
 		viewerToolbarBtn{id: vbtnSendFile, label: "Archivo", rc: rcFile},
-		viewerToolbarBtn{id: vbtnCAD, label: "CAD", rc: rcCAD},
+		viewerToolbarBtn{id: vbtnCAD, label: "Ctrl+Alt+Supr", rc: rcCAD},
 		viewerToolbarBtn{id: vbtnFull, label: fullLabel, rc: rcFull},
 		viewerToolbarBtn{id: vbtnDisc, label: "Desconectar", rc: rcDisc},
 		viewerToolbarBtn{id: vbtnHideBar, label: "▲", rc: rcHide},
