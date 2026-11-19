@@ -4,20 +4,9 @@ package win
 
 import (
 	"hash/fnv"
-	"syscall"
 	"unsafe"
 
 	"remote-control/internal/protocol"
-)
-
-var (
-	procGetCursorInfo = user32GUI.NewProc("GetCursorInfo")
-	procGetIconInfo   = user32GUI.NewProc("GetIconInfo")
-)
-
-const (
-	cursorShowing    = 0x00000001
-	cursorSuppressed = 0x00000002
 )
 
 // CursorTracker tracks local Windows mouse cursor position and shape changes,
