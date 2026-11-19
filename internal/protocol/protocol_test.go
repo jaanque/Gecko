@@ -125,3 +125,61 @@ func TestFileChunkAndSanitizeFileName(t *testing.T) {
 		}
 	}
 }
+
+func TestCursorPacketRoundTrip(t *testing.T) {
+	// 1. Position only (no shape payload)
+	p1 := CursorPacket{
+		X:         100,
+		Y:         200,
+		HotspotX:  2,
+		HotspotY:  4,
+		Width:     32,
+		Height:    32,
+		Visible:   true,
+		ShapeHash: 0xDEADBEEF,
+	}
+	raw1, err := EncodeCursor(p1)
+	if err != nil {
+		t.Fatalf("EncodeCursor failed: %v", err)
+	}
+	if len(raw1) != CursorHeaderSize {
+		t.Fatalf("len(raw1) = %d, want %d", len(raw1), CursorHeaderSize)
+	}
+	d1, err := DecodeCursor(raw1)
+	if err != nil {
+		t.Fatalf("DecodeCursor failed: %v", err)
+	}
+	if d1.X != p1.X || d1.Y != p1.Y || !d1.Visible || d1.ShapeHash != p1.ShapeHash || len(d1.ShapeBGRA) != 0 {
+		t.Fatalf("decoded mismatch: %+v", d1)
+	}
+
+	// 2. Position + Shape payload
+	fakeShape := make([]byte, 32*32*4)
+	fakeShape[0] = 0xAA
+	fakeShape[len(fakeShape)-1] = 0xBB
+	p2 := CursorPacket{
+		X:         500,
+		Y:         600,
+		HotspotX:  16,
+		HotspotY:  16,
+		Width:     32,
+		Height:    32,
+		Visible:   true,
+		ShapeHash: 0x12345678,
+		ShapeBGRA: fakeShape,
+	}
+	raw2, err := EncodeCursor(p2)
+	if err != nil {
+		t.Fatalf("EncodeCursor shape failed: %v", err)
+	}
+	d2, err := DecodeCursor(raw2)
+	if err != nil {
+		t.Fatalf("DecodeCursor shape failed: %v", err)
+	}
+	if d2.ShapeHash != p2.ShapeHash || len(d2.ShapeBGRA) != len(fakeShape) {
+		t.Fatalf("decoded shape mismatch: len=%d", len(d2.ShapeBGRA))
+	}
+	if !bytes.Equal(d2.ShapeBGRA, fakeShape) {
+		t.Fatal("decoded shape bytes do not match")
+	}
+}
