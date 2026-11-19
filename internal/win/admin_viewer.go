@@ -18,10 +18,19 @@ var (
 	procGetWindowPlacement = user32GUI.NewProc("GetWindowPlacement")
 	procSetWindowPlacement = user32GUI.NewProc("SetWindowPlacement")
 	procMonitorFromWindow  = user32GUI.NewProc("MonitorFromWindow")
+	procCreateIconIndirect = user32GUI.NewProc("CreateIconIndirect")
+	procDestroyIcon        = user32GUI.NewProc("DestroyIcon")
+	procCreateDIBSection   = gdi32GUI.NewProc("CreateDIBSection")
+	procCreateBitmap       = gdi32GUI.NewProc("CreateBitmap")
+	procDrawIconEx         = user32GUI.NewProc("DrawIconEx")
+	procLoadCursorW        = user32GUI.NewProc("LoadCursorW")
 )
 
 const (
 	wsOverlappedWindow = 0x00CF0000
+	wmDropFiles        = 0x0233
+	diNormal           = 0x0003
+	idcArrow           = 32512
 
 	wmSize         = 0x0005
 	wmKillFocus    = 0x0008
@@ -158,6 +167,16 @@ type remoteViewer struct {
 	lastMoveAt      time.Time
 	heldKeys        map[uint16]uint8
 	mouseBtns       int
+
+	cursorMu      sync.Mutex
+	cursorX       uint16
+	cursorY       uint16
+	cursorHotX    uint16
+	cursorHotY    uint16
+	cursorWidth   uint16
+	cursorHeight  uint16
+	cursorVisible bool
+	cursorHIcon   uintptr
 }
 
 var (
@@ -287,6 +306,7 @@ func (v *remoteViewer) Open(sessionID, hostname string, remoteW, remoteH, monito
 	v.lastClipText = ReadClipboardText()
 	v.clipMu.Unlock()
 	addClipboardListener(hwnd)
+	procDragAcceptFiles.Call(hwnd, 1)
 
 	go v.decodeLoop(sessionID, fCh, fEnd)
 	go v.inputLoop(inCh, mvCh, inDone)
@@ -322,6 +342,80 @@ func (v *remoteViewer) onLocalClipboardChanged() {
 	if changed && v.cb.OnClipboard != nil {
 		v.cb.OnClipboard(cur)
 	}
+}
+
+// ApplyRemoteCursor updates decoupled mouse cursor position and shape.
+func (v *remoteViewer) ApplyRemoteCursor(pkt protocol.CursorPacket) {
+	v.cursorMu.Lock()
+	v.cursorX = pkt.X
+	v.cursorY = pkt.Y
+	v.cursorVisible = pkt.Visible
+	v.cursorHotX = pkt.HotspotX
+	v.cursorHotY = pkt.HotspotY
+	v.cursorWidth = pkt.Width
+	v.cursorHeight = pkt.Height
+
+	if len(pkt.ShapeBGRA) > 0 {
+		if v.cursorHIcon != 0 {
+			procDestroyIcon.Call(v.cursorHIcon)
+			v.cursorHIcon = 0
+		}
+		v.cursorHIcon = createHIconFromBGRA(pkt.Width, pkt.Height, pkt.HotspotX, pkt.HotspotY, pkt.ShapeBGRA)
+	}
+	hwnd := v.hwnd
+	v.cursorMu.Unlock()
+
+	if hwnd != 0 {
+		procPostMessageW.Call(hwnd, wmViewerFrame, 0, 0)
+	}
+}
+
+func createHIconFromBGRA(w, h, hotX, hotY uint16, bgra []byte) uintptr {
+	if int(w) <= 0 || int(h) <= 0 || len(bgra) < int(w)*int(h)*4 {
+		return 0
+	}
+	var bi bitmapInfo
+	bi.Header.Size = uint32(unsafe.Sizeof(bi.Header))
+	bi.Header.Width = int32(w)
+	bi.Header.Height = -int32(h)
+	bi.Header.Planes = 1
+	bi.Header.BitCount = 32
+	bi.Header.Compression = biRGB
+
+	hdcScreen, _, _ := procGetDC.Call(0)
+	if hdcScreen == 0 {
+		return 0
+	}
+	defer procReleaseDC.Call(0, hdcScreen)
+
+	var pBits uintptr
+	hBmpColor, _, _ := procCreateDIBSection.Call(
+		hdcScreen,
+		uintptr(unsafe.Pointer(&bi)),
+		dibRGBColors,
+		uintptr(unsafe.Pointer(&pBits)),
+		0, 0,
+	)
+	if hBmpColor == 0 || pBits == 0 {
+		return 0
+	}
+	copy(unsafe.Slice((*byte)(ptrFromUintptr(pBits)), len(bgra)), bgra)
+
+	hBmpMask, _, _ := procCreateBitmap.Call(uintptr(w), uintptr(h), 1, 1, 0)
+
+	var ii iconInfo
+	ii.FIcon = 0
+	ii.XHotspot = uint32(hotX)
+	ii.YHotspot = uint32(hotY)
+	ii.HbmMask = hBmpMask
+	ii.HbmColor = hBmpColor
+
+	hIcon, _, _ := procCreateIconIndirect.Call(uintptr(unsafe.Pointer(&ii)))
+	procDeleteObject.Call(hBmpColor)
+	if hBmpMask != 0 {
+		procDeleteObject.Call(hBmpMask)
+	}
+	return hIcon
 }
 
 // SetFileStatus displays a brief transfer status notice in the viewer toolbar.
