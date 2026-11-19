@@ -61,12 +61,38 @@ type clientAgent struct {
 }
 
 func main() {
-	showVersion := flag.Bool("version", false, "Mostrar versión y salir")
-	langFlag := flag.String("lang", "", "Idioma de interfaz (ca, es, en)")
+	showVersion := flag.Bool("version", false, "Mostrar versió i sortir")
+	langFlag := flag.String("lang", "", "Idioma d'interfície (ca, es, en)")
+	installSvc := flag.Bool("install-service", false, "Instal·lar com a servei de Windows")
+	uninstallSvc := flag.Bool("uninstall-service", false, "Desinstal·lar el servei de Windows")
+	elevateFlag := flag.Bool("elevate", false, "Sol·licitar elevació de privilegis UAC")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version.Banner("ClientRemot"))
+		return
+	}
+	if *installSvc {
+		if err := win.InstallWindowsService("ClientRemot", "Client Remot Service"); err != nil {
+			fmt.Println("Error instal·lant servei:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Servei ClientRemot instal·lat correctament.")
+		return
+	}
+	if *uninstallSvc {
+		if err := win.UninstallWindowsService("ClientRemot"); err != nil {
+			fmt.Println("Error desinstal·lant servei:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Servei ClientRemot desinstal·lat correctament.")
+		return
+	}
+	if *elevateFlag {
+		if err := win.RequestUACElevation(); err != nil {
+			fmt.Println("Error d'elevació:", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -100,6 +126,7 @@ func main() {
 		strings:   str,
 		injector:  win.NewInputInjector(),
 		receiver:  transfer.NewReceiver(""),
+		adaptive:  video.NewAdaptiveController(),
 		ackWakeCh: make(chan struct{}, 1),
 	}
 	agent.quality.Store(78)
