@@ -362,7 +362,7 @@ func (a *AdminWindow) Run() error {
 	a.cursorHnd, _, _ = procLoadCursorW.Call(0, idcHand)
 
 	className, _ := syscall.UTF16PtrFromString("RemoteAdminMainWindowClass")
-	title, _ := syscall.UTF16PtrFromString("Gecko · Control Remoto v" + strings.TrimPrefix(version.Version, "v"))
+	title, _ := syscall.UTF16PtrFromString("Control Remoto")
 
 	wc := wndClassExW{
 		CbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
@@ -487,7 +487,7 @@ func (a *AdminWindow) createServerControls(parent uintptr) {
 		parent, idSearchBox, a.hInst, 0,
 	)
 	procSendMessageW.Call(a.ctrlSearch, wmSetFont, a.fontBody, 1)
-	if cue, err := syscall.UTF16PtrFromString("Buscar por equipo, usuario o IP..."); err == nil {
+	if cue, err := syscall.UTF16PtrFromString("Buscar equipo..."); err == nil {
 		procSendMessageW.Call(a.ctrlSearch, emSetCueBaner, 1, uintptr(unsafe.Pointer(cue)))
 	}
 
