@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"remote-control/internal/config"
 )
 
 type buildTarget struct {
@@ -43,6 +45,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error creando directorio %s: %v\n", dir, err)
 			os.Exit(1)
 		}
+	}
+
+	if err := config.EnsureDefaultIcons(); err != nil {
+		fmt.Fprintf(os.Stderr, "Aviso generando recursos de icono: %v\n", err)
 	}
 
 	targets := []buildTarget{
