@@ -11,7 +11,10 @@ import (
 )
 
 func TestWin32InputStructSizes(t *testing.T) {
-	const want uintptr = 40
+	want := uintptr(40)
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		want = 28
+	}
 	if got := unsafe.Sizeof(mouseInputPacket{}); got != want {
 		t.Fatalf("mouseInputPacket size = %d, want %d on %s", got, want, runtime.GOARCH)
 	}
