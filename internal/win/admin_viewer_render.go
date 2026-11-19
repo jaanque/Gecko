@@ -149,20 +149,14 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 		hostRC := rect{pad + dotSz + v.scale(9), 0, leftLimit, barH}
 		drawText(memDC, hostname, &hostRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 
-		statsText := statusMsg
-		if statsText == "" && rw > 0 && rh > 0 {
-			if rtt >= 0 {
-				statsText = fmt.Sprintf("%d×%d · %d fps · %d ms", rw, rh, fps, rtt)
-			} else {
-				statsText = fmt.Sprintf("%d×%d · %d fps", rw, rh, fps)
+		if statusMsg != "" {
+			statsStart := pad + dotSz + v.scale(9) + int32(len(hostname))*v.scale(9) + v.scale(14)
+			if statsStart < leftLimit-v.scale(20) {
+				procSelectObject.Call(memDC, v.fontBody)
+				procSetTextColor.Call(memDC, rgb(113, 113, 122))
+				statsRC := rect{statsStart, 0, leftLimit, barH}
+				drawText(memDC, statusMsg, &statsRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 			}
-		}
-		statsStart := pad + dotSz + v.scale(9) + int32(len(hostname))*v.scale(9) + v.scale(14)
-		if statsStart < leftLimit-v.scale(90) {
-			procSelectObject.Call(memDC, v.fontMono)
-			procSetTextColor.Call(memDC, rgb(113, 113, 122))
-			statsRC := rect{statsStart, 0, leftLimit, barH}
-			drawText(memDC, statsText, &statsRC, dtLeft|dtSingleLn|dtVCenter|dtEndEllip)
 		}
 
 		// Subtle vertical section dividers
@@ -174,10 +168,7 @@ func (v *remoteViewer) paint(hwnd uintptr) {
 		procSelectObject.Call(memDC, v.fontBtn)
 		for _, b := range v.toolbarBtns {
 			hovered := v.hoverBtn == b.id
-			active := (b.id == vbtnQualLow && qual == qualLowVal) ||
-				(b.id == vbtnQualMed && qual == qualMedVal) ||
-				(b.id == vbtnQualHi && qual == qualHiVal) ||
-				(b.id == vbtnMonAll && activeMon == -1) ||
+			active := (b.id == vbtnMonAll && activeMon == -1) ||
 				(b.id >= vbtnMonBase && activeMon == b.id-vbtnMonBase)
 
 			bg := rgb(255, 255, 255)
