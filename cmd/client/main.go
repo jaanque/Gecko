@@ -19,10 +19,12 @@ import (
 
 	"remote-control/internal/config"
 	"remote-control/internal/i18n"
+	"remote-control/internal/p2p"
 	"remote-control/internal/protocol"
 	"remote-control/internal/security"
 	"remote-control/internal/transfer"
 	"remote-control/internal/version"
+	"remote-control/internal/video"
 	"remote-control/internal/win"
 )
 
@@ -35,9 +37,12 @@ type clientAgent struct {
 	window   *win.ClientWindow
 	injector *win.InputInjector
 	receiver *transfer.Receiver
+	adaptive *video.AdaptiveController
 
 	mu           sync.Mutex
 	conn         *tls.Conn
+	p2pLn        *p2p.P2PListener
+	p2pConn      net.Conn
 	writeMu      sync.Mutex
 	pendingID    string
 	activeID     string
