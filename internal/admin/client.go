@@ -109,7 +109,11 @@ func (c *RelayClient) Configure(p security.RelayProfile) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(c.profilePath, raw, 0o600); err != nil {
+	toWrite, err := security.ProtectData(raw)
+	if err != nil {
+		toWrite = raw
+	}
+	if err := os.WriteFile(c.profilePath, toWrite, 0o600); err != nil {
 		return err
 	}
 
